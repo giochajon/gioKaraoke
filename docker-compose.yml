@@ -1,0 +1,39 @@
+services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.7
+    container_name: giokaraoke-search
+    ports:
+      - "7700:7700"
+    volumes:
+      - meilisearch_data:/meili_data
+    environment:
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:-karaoke-secret-key}
+      - MEILI_ENV=development
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: giokaraoke-app
+    ports:
+      - "8094:3000"
+    volumes:
+      - ${SONGS_PATH:-./songs}:/songs:ro
+    environment:
+      - MEILISEARCH_URL=http://meilisearch:7700
+      - MEILISEARCH_KEY=${MEILI_MASTER_KEY:-karaoke-secret-key}
+      - SONGS_PATH=/songs
+      - PORT=3000
+    depends_on:
+      meilisearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  meilisearch_data:

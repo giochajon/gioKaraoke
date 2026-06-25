@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gioKaraoke — Library</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body style="overflow: auto;">
+<div class="app" style="display:block; height:auto;">
+  <header>
+    <h1>🎤 gioKaraoke</h1>
+    <a href="/">◀ Back to Player</a>
+  </header>
+
+  <div class="admin-wrap">
+    <h2>Song Library</h2>
+    <p>Index your karaoke files into Meilisearch so they appear in search.</p>
+
+    <!-- Stats -->
+    <div class="admin-card">
+      <h3>Index Status</h3>
+      <div class="stat-row">
+        <div class="stat-box">
+          <div class="val" id="stat-songs">—</div>
+          <div class="lbl">Songs indexed</div>
+        </div>
+        <div class="stat-box">
+          <div class="val" id="stat-status">—</div>
+          <div class="lbl">Meilisearch</div>
+        </div>
+      </div>
+      <button class="big-btn" id="btn-refresh" onclick="loadStats()">↻ Refresh</button>
+    </div>
+
+    <!-- Indexing -->
+    <div class="admin-card">
+      <h3>Re-index Songs</h3>
+      <p style="margin-bottom:14px; font-size:0.85rem;">
+        Scans the mounted <code style="color:#a0d0ff">/songs</code> directory and rebuilds the search index.
+        Supported formats: <strong>MP3+CDG</strong>, <strong>MP4</strong>, <strong>ZIP</strong>.
+      </p>
+      <button class="big-btn" id="btn-index" onclick="startIndex()">⚡ Index Songs</button>
+      <div class="status-msg" id="index-status">Ready.</div>
+    </div>
+
+    <!-- Mount instructions -->
+    <div class="admin-card">
+      <h3>Mounting Songs</h3>
+      <p style="margin-bottom:12px; font-size:0.85rem;">
+        Set the <code style="color:#a0d0ff">SONGS_PATH</code> variable in <code style="color:#a0d0ff">.env</code> to your karaoke folder:
+      </p>
+      <div class="code-block">SONGS_PATH=/home/user/karaoke
+
+# Then start with:
+docker compose up -d</div>
+
+      <p style="margin-top:14px; margin-bottom:12px; font-size:0.85rem;">
+        Or to generate a file list manually on the host:
+      </p>
+      <div class="code-block">find "$PWD" -type f \( -name "*.mp3" -o -name "*.mp4" \
+  -o -name "*.cdg" -o -name "*.zip" \) -print0 \
+  | xargs -0 realpath > filelist.txt</div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function loadStats() {
+  try {
+    const res  = await fetch('/api/admin/stats');
+    const data = await res.json();
+    document.getElementById('stat-songs').textContent  = data.numberOfDocuments ?? '0';
+    document.getElementById('stat-status').textContent = '✓ Online';
+    document.getElementById('stat-status').style.color = '#81c784';
+  } catch (e) {
+    document.getElementById('stat-status').textContent = '✗ Error';
+    document.getElementById('stat-status').style.color = '#ff7096';
+  }
+}
+
+async function startIndex() {
+  const btn = document.getElementById('btn-index');
+  const msg = document.getElementById('index-status');
+  btn.disabled = true;
+  btn.textContent = '⏳ Indexing…';
+  msg.className   = 'status-msg';
+  msg.textContent = 'Scanning /songs directory…';
+
+  try {
+    const res  = await fetch('/api/admin/index', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      msg.className   = 'status-msg ok';
+      msg.textContent = `✓ Done — indexed ${data.indexed} song${data.indexed !== 1 ? 's' : ''}.`;
+      loadStats();
+    } else {
+      msg.className   = 'status-msg err';
+      msg.textContent = `✗ Error: ${data.error}`;
+    }
+  } catch (e) {
+    msg.className   = 'status-msg err';
+    msg.textContent = `✗ Network error: ${e.message}`;
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = '⚡ Index Songs';
+  }
+}
+
+loadStats();
+</script>
+</body>
+</html>
