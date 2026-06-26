@@ -1,0 +1,433 @@
+"""
+gioKaraoke Processor
+Converts an MP3 into a Karaoke MP4:
+  1. Vocal separation   — audio-separator (UVR MDXNET KARA model)
+  2. Lyric transcription — whisper-timestamped (word-level timestamps)
+  3. ASS subtitle file   — karaoke \kf fill effect
+  4. Background image    — PIL dark-purple music-themed art
+  5. Video render        — ffmpeg: instrumental + background + subtitles → MP4
+"""
+
+import asyncio
+import json
+import math
+import os
+import random
+import shutil
+import subprocess
+import tempfile
+import uuid
+from typing import Optional
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+from PIL import Image, ImageDraw, ImageFont
+
+MODEL_CACHE = os.environ.get("MODEL_CACHE", "/tmp/model_cache")
+WHISPER_CACHE = os.path.join(MODEL_CACHE, "whisper")
+SEPARATOR_CACHE = os.path.join(MODEL_CACHE, "audio_separator")
+
+for d in (MODEL_CACHE, WHISPER_CACHE, SEPARATOR_CACHE):
+    os.makedirs(d, exist_ok=True)
+
+app = FastAPI()
+
+# In-memory job registry — ephemeral, no disk persistence
+jobs: dict[str, dict] = {}
+
+
+def update_job(job_id: str, **kwargs) -> None:
+    if job_id in jobs:
+        jobs[job_id].update(kwargs)
+
+
+# ── Background image ─────────────────────────────────────────────────────────
+
+_NOTES = ["♩", "♪", "♫", "♬", "♭", "♮", "♯"]
+_ACCENT = (124, 77, 255)   # --accent #7c4dff
+_ACCENT2 = (224, 64, 251)  # --accent2 #e040fb
+_BG_DARK = (13, 13, 26)    # --bg #0d0d1a
+
+
+def _get_fonts() -> tuple:
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return (
+                    ImageFont.truetype(path, 56),
+                    ImageFont.truetype(path, 30),
+                    ImageFont.truetype(path, 18),
+                )
+            except OSError:
+                pass
+    f = ImageFont.load_default()
+    return f, f, f
+
+
+def generate_background(tmpdir: str, song_title: str = "") -> str:
+    W, H = 1280, 720
+    img = Image.new("RGB", (W, H), _BG_DARK)
+    draw = ImageDraw.Draw(img)
+
+    # Radial gradient glow from center
+    cx, cy = W // 2, H // 2
+    for r in range(360, 0, -1):
+        t = 1 - r / 360
+        c = (
+            int(_BG_DARK[0] + (_ACCENT[0] - _BG_DARK[0]) * t * 0.18),
+            int(_BG_DARK[1] + (_ACCENT[1] - _BG_DARK[1]) * t * 0.10),
+            int(_BG_DARK[2] + (_ACCENT[2] - _BG_DARK[2]) * t * 0.25),
+        )
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=c)
+
+    font_lg, font_sm, font_xs = _get_fonts()
+
+    # Scattered music notes
+    rng = random.Random(42)
+    for _ in range(28):
+        x = rng.randint(10, W - 70)
+        y = rng.randint(10, H - 90)
+        note = rng.choice(_NOTES)
+        alpha = rng.randint(18, 55)
+        font = font_lg if rng.random() > 0.45 else font_sm
+        color = (
+            min(255, _ACCENT[0] + alpha),
+            min(255, _ACCENT[1] + alpha // 3),
+            min(255, _ACCENT[2] + alpha // 2),
+        )
+        draw.text((x, y), note, fill=color, font=font)
+
+    # Stars
+    for _ in range(100):
+        x = rng.randint(0, W)
+        y = rng.randint(0, H)
+        sz = rng.choice([1, 1, 1, 2, 2, 3])
+        b = rng.randint(40, 130)
+        draw.ellipse([x - sz, y - sz, x + sz, y + sz], fill=(b, b, min(255, b + 40)))
+
+    # Decorative staff lines (top-left cluster)
+    staff_y = 60
+    for i in range(5):
+        y = staff_y + i * 8
+        draw.line([(30, y), (200, y)], fill=(60, 35, 90), width=1)
+
+    # Another staff (bottom-right)
+    staff_y2 = H - 100
+    for i in range(5):
+        y = staff_y2 + i * 8
+        draw.line([(W - 220, y), (W - 30, y)], fill=(60, 35, 90), width=1)
+
+    # Border
+    draw.rectangle([0, 0, W - 1, H - 1], outline=(55, 30, 85), width=2)
+    draw.rectangle([5, 5, W - 6, H - 6], outline=(35, 18, 55), width=1)
+
+    # Song title watermark top-center (subtle)
+    if song_title:
+        label = song_title[:60]
+        draw.text((W // 2, 22), label, fill=(80, 55, 100), font=font_xs, anchor="mm")
+
+    bg_path = os.path.join(tmpdir, "background.png")
+    img.save(bg_path, "PNG")
+    return bg_path
+
+
+# ── ASS subtitle generation ──────────────────────────────────────────────────
+
+# ASS colours: &HAABBGGRR  (alpha, blue, green, red — reversed RGB with alpha)
+_ASS_HEADER = """\
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1280
+PlayResY: 720
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Karaoke,Arial,62,&H0000FFFF,&H00FFFFFF,&H00150025,&H78000000,-1,0,0,0,100,100,0.8,0,1,3,1,2,30,30,75,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+# PrimaryColour &H0000FFFF = yellow (sung/highlighted)
+# SecondaryColour &H00FFFFFF = white (not yet sung)
+
+
+def _ts(seconds: float) -> str:
+    """Seconds → ASS timestamp H:MM:SS.cc"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds % 60
+    return f"{h}:{m:02d}:{int(s):02d}.{round((s % 1) * 100):02d}"
+
+
+def generate_ass(result: dict, tmpdir: str) -> str:
+    lines = []
+
+    for seg in result.get("segments", []):
+        words = seg.get("words", [])
+
+        if not words:
+            # Fallback: whole-segment line
+            cs = max(1, round((seg["end"] - seg["start"]) * 100))
+            text = seg["text"].strip()
+            lines.append(
+                f"Dialogue: 0,{_ts(seg['start'])},{_ts(seg['end'])},"
+                f"Karaoke,,0,0,0,,{{\\kf{cs}}}{text}"
+            )
+            continue
+
+        # Break words into display lines of ≤8 words or ≤6 s
+        current: list[dict] = []
+        line_start: Optional[float] = None
+
+        def flush(wds: list[dict]) -> None:
+            if not wds:
+                return
+            s = _ts(wds[0]["start"])
+            e = _ts(wds[-1]["end"])
+            parts = []
+            for w in wds:
+                cs = max(1, round((w["end"] - w["start"]) * 100))
+                tok = w["word"].strip()
+                if tok:
+                    parts.append(f"{{\\kf{cs}}}{tok} ")
+            text = "".join(parts).rstrip()
+            if text:
+                lines.append(
+                    f"Dialogue: 0,{s},{e},Karaoke,,0,0,0,,{text}"
+                )
+
+        for i, w in enumerate(words):
+            if line_start is None:
+                line_start = w.get("start", 0)
+            current.append(w)
+            duration = w.get("end", 0) - line_start
+            if len(current) >= 8 or duration >= 6.0 or i == len(words) - 1:
+                flush(current)
+                current = []
+                line_start = None
+
+    ass_path = os.path.join(tmpdir, "lyrics.ass")
+    with open(ass_path, "w", encoding="utf-8") as fh:
+        fh.write(_ASS_HEADER)
+        fh.write("\n".join(lines))
+        fh.write("\n")
+
+    return ass_path
+
+
+# ── Video rendering ──────────────────────────────────────────────────────────
+
+def render_video(
+    instrumental_path: str,
+    bg_path: str,
+    ass_path: str,
+    output_path: str,
+) -> str:
+    # ffmpeg-python is imported here (per the project spec); subprocess
+    # is used directly for reliable filter-chain control.
+    import ffmpeg as _ffmpeg
+
+    probe = _ffmpeg.probe(instrumental_path)
+    duration = float(probe["format"]["duration"])
+
+    # Escape colon in path (ffmpeg filter option separator)
+    ass_escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-framerate", "25", "-t", str(duration), "-i", bg_path,
+        "-i", instrumental_path,
+        "-vf", f"ass='{ass_escaped}'",
+        "-c:v", "libx264",
+        "-tune", "stillimage",
+        "-crf", "23",
+        "-preset", "fast",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-shortest",
+        output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg failed:\n{result.stderr[-800:]}")
+    return output_path
+
+
+# ── Processing pipeline ───────────────────────────────────────────────────────
+
+async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) -> None:
+    loop = asyncio.get_event_loop()
+
+    try:
+        # ── Step 1: Vocal separation ────────────────────────────────────────
+        update_job(job_id, status="separating", progress=8,
+                   step="Separating vocals from instrumental track…")
+
+        def _separate() -> list[str]:
+            from audio_separator.separator import Separator
+            sep = Separator(
+                output_dir=tmpdir,
+                model_file_dir=SEPARATOR_CACHE,
+                output_format="mp3",
+                log_level=20,
+            )
+            sep.load_model("UVR_MDXNET_KARA_2.onnx")
+            return sep.separate(mp3_path)
+
+        outputs = await loop.run_in_executor(None, _separate)
+
+        # Find the instrumental file (avoids vocals)
+        instrumental_path: Optional[str] = None
+        for f in outputs:
+            fn = os.path.basename(f).lower()
+            if any(k in fn for k in ("instrumental", "no_vocal", "(inst")):
+                instrumental_path = f
+                break
+        if instrumental_path is None:
+            # Fall back: pick the larger output file (usually instrumental)
+            instrumental_path = max(outputs, key=lambda p: os.path.getsize(p))
+
+        # ── Step 2: Transcription ───────────────────────────────────────────
+        update_job(job_id, status="transcribing", progress=40,
+                   step="Transcribing lyrics with Whisper…")
+
+        def _transcribe() -> dict:
+            import whisper_timestamped as whisper
+            audio = whisper.load_audio(mp3_path)
+            model = whisper.load_model("base", download_root=WHISPER_CACHE)
+            return whisper.transcribe(
+                model, audio,
+                language=None,
+                detect_disfluencies=False,
+                verbose=False,
+            )
+
+        transcript = await loop.run_in_executor(None, _transcribe)
+
+        # ── Step 3: ASS subtitles ───────────────────────────────────────────
+        update_job(job_id, status="subtitles", progress=65,
+                   step="Generating karaoke subtitle file…")
+        ass_path = generate_ass(transcript, tmpdir)
+
+        # ── Step 4: Background ──────────────────────────────────────────────
+        update_job(job_id, status="background", progress=72,
+                   step="Creating background artwork…")
+        bg_path = generate_background(tmpdir, song_title)
+
+        # ── Step 5: Render video ────────────────────────────────────────────
+        update_job(job_id, status="rendering", progress=78,
+                   step="Rendering MP4 with FFmpeg…")
+        output_path = os.path.join(tmpdir, "karaoke_output.mp4")
+
+        def _render() -> str:
+            return render_video(instrumental_path, bg_path, ass_path, output_path)
+
+        await loop.run_in_executor(None, _render)
+
+        update_job(job_id, status="done", progress=100,
+                   step="Done! Your karaoke video is ready.",
+                   output_path=output_path)
+
+    except Exception as exc:
+        import traceback
+        err = f"{exc}"
+        update_job(job_id, status="error", progress=0,
+                   step=f"Error: {err}", error=err)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── API ───────────────────────────────────────────────────────────────────────
+
+@app.post("/api/convert/upload")
+async def upload(file: UploadFile, background_tasks: BackgroundTasks):
+    if not file.filename or not file.filename.lower().endswith(".mp3"):
+        raise HTTPException(400, detail="Only .mp3 files are accepted.")
+
+    job_id = str(uuid.uuid4())
+    tmpdir = tempfile.mkdtemp(prefix="karaoke-")
+    mp3_path = os.path.join(tmpdir, file.filename)
+    song_title = os.path.splitext(file.filename)[0].replace("_", " ").replace("-", " ").title()
+
+    content = await file.read()
+    with open(mp3_path, "wb") as fh:
+        fh.write(content)
+
+    jobs[job_id] = {
+        "status": "queued",
+        "progress": 2,
+        "step": "Queued — waiting for processing slot…",
+        "tmpdir": tmpdir,
+        "mp3_path": mp3_path,
+        "song_title": song_title,
+        "output_path": None,
+        "error": None,
+    }
+
+    background_tasks.add_task(process_job, job_id, mp3_path, tmpdir, song_title)
+    return {"job_id": job_id, "song_title": song_title}
+
+
+@app.get("/api/convert/status/{job_id}")
+async def status_stream(job_id: str):
+    async def _gen():
+        while True:
+            job = jobs.get(job_id)
+            if job is None:
+                yield f"data: {json.dumps({'status': 'not_found'})}\n\n"
+                break
+            payload = {
+                "status": job["status"],
+                "progress": job["progress"],
+                "step": job["step"],
+                "error": job.get("error"),
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+            if job["status"] in ("done", "error"):
+                break
+            await asyncio.sleep(1.5)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/convert/download/{job_id}")
+async def download(job_id: str, background_tasks: BackgroundTasks):
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="Job not found.")
+    if job["status"] != "done":
+        raise HTTPException(400, detail=f"Job not ready (status: {job['status']}).")
+
+    output_path = job.get("output_path")
+    if not output_path or not os.path.exists(output_path):
+        raise HTTPException(500, detail="Output file missing.")
+
+    tmpdir = job["tmpdir"]
+    song_title = job.get("song_title", "karaoke")
+
+    def _cleanup():
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        jobs.pop(job_id, None)
+
+    background_tasks.add_task(_cleanup)
+
+    return FileResponse(
+        output_path,
+        media_type="video/mp4",
+        filename=f"{song_title}_karaoke.mp4",
+    )
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "jobs": len(jobs)}
