@@ -30,10 +30,30 @@ services:
       - MEILISEARCH_KEY=${MEILI_MASTER_KEY:-karaoke-secret-key}
       - SONGS_PATH=/songs
       - PORT=3000
+      - PROCESSOR_URL=http://processor:5000
     depends_on:
       meilisearch:
         condition: service_healthy
     restart: unless-stopped
 
+  processor:
+    build:
+      context: ./processor
+      dockerfile: Dockerfile
+    container_name: giokaraoke-processor
+    environment:
+      - MODEL_CACHE=/model_cache
+    volumes:
+      # Persist AI model downloads across container restarts (~500 MB)
+      - model_cache:/model_cache
+      # Temp working dir: OS-managed, no persistent user data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 volumes:
   meilisearch_data:
+  model_cache:

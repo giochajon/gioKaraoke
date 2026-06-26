@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gioKaraoke — Karaoke Creator</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body style="overflow: auto;">
+<div class="app" style="display:block; height:auto; min-height:100vh;">
+  <header>
+    <h1>🎤 gioKaraoke</h1>
+    <nav class="header-nav">
+      <a href="/">◀ Back to Player</a>
+      <a href="/admin.html">⚙ Library</a>
+    </nav>
+  </header>
+
+  <div class="conv-wrap">
+    <h2>🎬 Karaoke Creator</h2>
+    <p>Drop an MP3 to strip the lead vocals, transcribe the lyrics, and export a karaoke MP4 — all open-source, all local.</p>
+
+    <!-- Pipeline diagram -->
+    <div class="pipeline">
+      <div class="pipe-step" id="ps-separate">
+        <div class="pipe-icon">🎙</div>
+        <div class="pipe-label">Separate<br>Vocals</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step" id="ps-transcribe">
+        <div class="pipe-icon">📝</div>
+        <div class="pipe-label">Transcribe<br>Lyrics</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step" id="ps-subtitles">
+        <div class="pipe-icon">💬</div>
+        <div class="pipe-label">Sync<br>Subtitles</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step" id="ps-render">
+        <div class="pipe-icon">🎬</div>
+        <div class="pipe-label">Render<br>MP4</div>
+      </div>
+    </div>
+
+    <!-- Drop zone -->
+    <div class="drop-zone" id="drop-zone">
+      <div class="drop-inner">
+        <div class="drop-icon">🎵</div>
+        <p class="drop-text">Drag &amp; drop MP3 files here</p>
+        <p class="drop-sub">or</p>
+        <label class="big-btn" for="file-input">Choose Files</label>
+        <input type="file" id="file-input" accept=".mp3" multiple hidden>
+      </div>
+    </div>
+
+    <!-- Job list -->
+    <div id="job-list"></div>
+
+    <!-- Info footer -->
+    <div class="conv-info admin-card" style="margin-top:20px;">
+      <h3>How it works</h3>
+      <p style="font-size:0.85rem;margin-bottom:8px;">
+        Each MP3 is processed on the server using three open-source tools:
+      </p>
+      <ul class="info-list">
+        <li><strong>audio-separator</strong> — removes the lead vocalist using the UVR MDX-Net KARA model</li>
+        <li><strong>Whisper</strong> — transcribes word-level timestamps from the original track</li>
+        <li><strong>FFmpeg</strong> — merges the instrumental audio, background art, and ASS karaoke subtitles into an MP4</li>
+      </ul>
+      <p style="font-size:0.8rem; margin-top:10px; color: var(--text-dim);">
+        ⚠ First run downloads AI models (~500 MB). Subsequent runs are faster.
+        Files are not stored on the server — they are streamed directly to your browser.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script src="/js/convert.js"></script>
+</body>
+</html>

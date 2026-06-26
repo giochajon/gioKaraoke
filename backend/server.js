@@ -5,6 +5,7 @@ const AdmZip = require('adm-zip');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const http = require('http');
 const os = require('os');
 
 const app = express();
@@ -13,6 +14,7 @@ const SONGS_PATH = process.env.SONGS_PATH || '/songs';
 const MEILI_URL = process.env.MEILISEARCH_URL || 'http://localhost:7700';
 const MEILI_KEY = process.env.MEILISEARCH_KEY || '';
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
+const PROCESSOR_URL = process.env.PROCESSOR_URL || 'http://processor:5000';
 
 const client = new MeiliSearch({ host: MEILI_URL, apiKey: MEILI_KEY });
 
@@ -247,6 +249,43 @@ app.get('/api/admin/stats', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── Converter proxy → Python processor service ───────────────────────────────
+// Pipes all /api/convert/* requests to the processor container.
+// No body buffering — multipart uploads and SSE streams pass through as-is.
+
+app.use('/api/convert', (req, res) => {
+  const target = new URL(PROCESSOR_URL);
+  const options = {
+    hostname: target.hostname,
+    port: parseInt(target.port) || 80,
+    path: '/api/convert' + req.url,
+    method: req.method,
+    headers: {
+      ...req.headers,
+      host: target.host,
+      // Disable nginx-style proxy buffering so SSE chunks flush immediately
+      'x-accel-buffering': 'no',
+    },
+  };
+
+  const proxyReq = http.request(options, proxyRes => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res, { end: true });
+  });
+
+  proxyReq.setTimeout(0); // no timeout — processing can take several minutes
+
+  proxyReq.on('error', () => {
+    if (!res.headersSent) {
+      res.status(503).json({
+        error: 'Processor service is unavailable. Make sure the processor container is running.',
+      });
+    }
+  });
+
+  req.pipe(proxyReq, { end: true });
 });
 
 // SPA fallback
