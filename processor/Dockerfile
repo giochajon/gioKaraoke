@@ -10,9 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# CPU-only PyTorch first (keeps the image from needing CUDA drivers)
+# CPU-only PyTorch — all three packages must come from the same index
 RUN pip install --no-cache-dir \
-    torch torchaudio \
+    torch torchaudio torchvision \
     --index-url https://download.pytorch.org/whl/cpu
 
 COPY requirements.txt .
