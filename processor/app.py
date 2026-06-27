@@ -173,12 +173,15 @@ def generate_ass(result: dict, tmpdir: str) -> str:
 
         if not words:
             # Fallback: whole-segment line
-            cs = max(1, round((seg["end"] - seg["start"]) * 100))
-            text = seg["text"].strip()
-            lines.append(
-                f"Dialogue: 0,{_ts(seg['start'])},{_ts(seg['end'])},"
-                f"Karaoke,,0,0,0,,{{\\kf{cs}}}{text}"
-            )
+            t0 = seg.get("start", 0)
+            t1 = seg.get("end", t0 + 1)
+            cs = max(1, round((t1 - t0) * 100))
+            text = (seg.get("text") or "").strip()
+            if text:
+                lines.append(
+                    f"Dialogue: 0,{_ts(t0)},{_ts(t1)},"
+                    f"Karaoke,,0,0,0,,{{\\kf{cs}}}{text}"
+                )
             continue
 
         # Break words into display lines of ≤8 words or ≤6 s
@@ -188,12 +191,12 @@ def generate_ass(result: dict, tmpdir: str) -> str:
         def flush(wds: list[dict]) -> None:
             if not wds:
                 return
-            s = _ts(wds[0]["start"])
-            e = _ts(wds[-1]["end"])
+            s = _ts(wds[0].get("start", 0))
+            e = _ts(wds[-1].get("end", 0))
             parts = []
             for w in wds:
-                cs = max(1, round((w["end"] - w["start"]) * 100))
-                tok = w["word"].strip()
+                cs = max(1, round((w.get("end", 0) - w.get("start", 0)) * 100))
+                tok = (w.get("word") or w.get("text", "")).strip()
                 if tok:
                     parts.append(f"{{\\kf{cs}}}{tok} ")
             text = "".join(parts).rstrip()
@@ -229,19 +232,14 @@ def render_video(
     ass_path: str,
     output_path: str,
 ) -> str:
-    # ffmpeg-python is imported here (per the project spec); subprocess
-    # is used directly for reliable filter-chain control.
-    import ffmpeg as _ffmpeg
-
-    probe = _ffmpeg.probe(instrumental_path)
-    duration = float(probe["format"]["duration"])
-
     # Escape colon in path (ffmpeg filter option separator)
     ass_escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:")
 
+    # -loop 1 keeps the static image looping; -shortest stops when audio ends.
+    # No ffprobe needed — duration is handled automatically by -shortest.
     cmd = [
         "ffmpeg", "-y",
-        "-loop", "1", "-framerate", "25", "-t", str(duration), "-i", bg_path,
+        "-loop", "1", "-framerate", "25", "-i", bg_path,
         "-i", instrumental_path,
         "-vf", f"ass='{ass_escaped}'",
         "-c:v", "libx264",
@@ -281,18 +279,37 @@ async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) 
             sep.load_model("UVR_MDXNET_KARA_2.onnx")
             return sep.separate(mp3_path)
 
-        outputs = await loop.run_in_executor(None, _separate)
+        async def _heartbeat_separate() -> list[str]:
+            elapsed = 0
+            future = loop.run_in_executor(None, _separate)
+            while not future.done():
+                await asyncio.sleep(10)
+                elapsed += 10
+                m, s = divmod(elapsed, 60)
+                update_job(
+                    job_id,
+                    step=f"Separating vocals… ({m}m {s:02d}s elapsed — CPU mode can take 10–20 min)",
+                )
+            return await future
+
+        outputs = await _heartbeat_separate()
+
+        # audio-separator returns bare filenames in some versions; resolve to full paths
+        resolved = [
+            f if os.path.isabs(f) else os.path.join(tmpdir, f)
+            for f in outputs
+        ]
 
         # Find the instrumental file (avoids vocals)
         instrumental_path: Optional[str] = None
-        for f in outputs:
+        for f in resolved:
             fn = os.path.basename(f).lower()
             if any(k in fn for k in ("instrumental", "no_vocal", "(inst")):
                 instrumental_path = f
                 break
         if instrumental_path is None:
             # Fall back: pick the larger output file (usually instrumental)
-            instrumental_path = max(outputs, key=lambda p: os.path.getsize(p))
+            instrumental_path = max(resolved, key=lambda p: os.path.getsize(p))
 
         # ── Step 2: Transcription ───────────────────────────────────────────
         update_job(job_id, status="transcribing", progress=40,
