@@ -477,19 +477,56 @@ async def process_youtube_job(
     save_to_library: bool,
     tmpdir: str,
 ) -> None:
+    import traceback as _tb
+
     loop = asyncio.get_event_loop()
+
+    class _YTLogger:
+        """Redirect yt-dlp output to stdout so errors appear in Docker logs."""
+        def debug(self, msg):
+            if not msg.startswith("[debug] "):
+                print(f"[yt-dlp] {msg}", flush=True)
+        def warning(self, msg):
+            print(f"[yt-dlp WARNING] {msg}", flush=True)
+        def error(self, msg):
+            print(f"[yt-dlp ERROR] {msg}", flush=True)
+
+    _YT_BASE_OPTS = {
+        "logger": _YTLogger(),
+        "socket_timeout": 30,
+        "retries": 3,
+        "noplaylist": True,
+    }
+
     try:
         # ── Step 1: URL Parse + metadata ──────────────────────────────────────
         update_yt_job(job_id, status="parsing", progress=5,
-                      step="Parsing URL and fetching video metadata…")
+                      step="Fetching video information from YouTube…")
 
         def _get_info():
             import yt_dlp
-            with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True,
-                                    "no_warnings": True}) as ydl:
-                return ydl.extract_info(url, download=False)
+            opts = {**_YT_BASE_OPTS, "skip_download": True}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise RuntimeError(
+                        "yt-dlp returned no info. The video may be unavailable, "
+                        "private, or region-blocked."
+                    )
+                return info
 
-        info = await loop.run_in_executor(None, _get_info)
+        async def _heartbeat_info():
+            elapsed = 0
+            future = loop.run_in_executor(None, _get_info)
+            while not future.done():
+                await asyncio.sleep(8)
+                elapsed += 8
+                if yt_jobs.get(job_id, {}).get("status") == "parsing":
+                    update_yt_job(job_id,
+                                  step=f"Fetching video info… ({elapsed}s elapsed)")
+            return await future
+
+        info = await _heartbeat_info()
         title = info.get("title", "audio")
         safe_title = (
             "".join(c for c in title if c.isalnum() or c in " _-").strip()[:80]
@@ -506,27 +543,40 @@ async def process_youtube_job(
             import yt_dlp
 
             def _hook(d):
-                if d["status"] == "downloading":
-                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                    done = d.get("downloaded_bytes", 0)
-                    pct = 15 + int((done / total) * 35) if total else 20
-                    speed = d.get("speed") or 0
-                    spd = f" — {speed / 1024:.0f} KB/s" if speed else ""
-                    update_yt_job(job_id, status="downloading", progress=pct,
-                                  step=f"Downloading audio stream{spd}…")
+                try:
+                    if d["status"] == "downloading":
+                        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                        done = d.get("downloaded_bytes", 0)
+                        pct = 20 + int((done / total) * 30) if total else 25
+                        speed = d.get("speed") or 0
+                        spd = f" — {speed / 1024:.0f} KB/s" if speed else ""
+                        update_yt_job(job_id, status="downloading", progress=pct,
+                                      step=f"Downloading audio stream{spd}…")
+                except Exception as hook_exc:
+                    print(f"[yt-dlp hook error] {hook_exc}", flush=True)
 
             opts = {
+                **_YT_BASE_OPTS,
                 "format": "bestaudio/best",
                 "outtmpl": os.path.join(tmpdir, "raw_audio.%(ext)s"),
                 "progress_hooks": [_hook],
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
 
-        await loop.run_in_executor(None, _download)
+        async def _heartbeat_download():
+            elapsed = 0
+            future = loop.run_in_executor(None, _download)
+            while not future.done():
+                await asyncio.sleep(8)
+                elapsed += 8
+                m, s = divmod(elapsed, 60)
+                if yt_jobs.get(job_id, {}).get("status") in ("extracting", "downloading"):
+                    update_yt_job(job_id,
+                                  step=f"Downloading audio… ({m}m {s:02d}s elapsed)")
+            await future
+
+        await _heartbeat_download()
 
         raw_files = [f for f in os.listdir(tmpdir) if f.startswith("raw_audio.")]
         if not raw_files:
@@ -591,9 +641,11 @@ async def process_youtube_job(
                       library_saved=library_saved)
 
     except Exception as exc:
-        err = str(exc)
+        err_msg = str(exc)
+        print(f"[yt-mp3] Job {job_id} failed: {err_msg}", flush=True)
+        _tb.print_exc()
         update_yt_job(job_id, status="error", progress=0,
-                      step=f"Error: {err}", error=err)
+                      step=f"Error: {err_msg}", error=err_msg)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -611,11 +663,17 @@ async def youtube_submit(body: YTSubmit, background_tasks: BackgroundTasks):
     if is_playlist:
         def _playlist_info():
             import yt_dlp
+
+            class _L:
+                def debug(self, m): pass
+                def warning(self, m): print(f"[yt-dlp] {m}", flush=True)
+                def error(self, m): print(f"[yt-dlp ERROR] {m}", flush=True)
+
             opts = {
-                "quiet": True,
+                "logger": _L(),
                 "skip_download": True,
                 "extract_flat": "in_playlist",
-                "no_warnings": True,
+                "socket_timeout": 30,
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(url, download=False)

@@ -141,57 +141,76 @@ function allStepsDone(card) {
   });
 }
 
-// ── SSE watcher ───────────────────────────────────────────────────────────────
+// ── SSE watcher (with auto-reconnect) ────────────────────────────────────────
 function watchJob(jobId, card) {
-  const es = new EventSource(`/api/youtube/status/${jobId}`);
+  let retries = 0;
+  const MAX_RETRIES = 6;
 
-  es.onmessage = e => {
-    const { status, progress, step, title, error, library_saved } = JSON.parse(e.data);
+  function connect() {
+    const es = new EventSource(`/api/youtube/status/${jobId}`);
 
-    if (progress != null) setProgress(card, progress);
-    if (step)   setStatus(card, step);
-    if (title)  updateTitle(card, title);
+    es.onmessage = e => {
+      retries = 0; // reset backoff on each good message
 
-    const stepKey = INLINE_MAP[status];
-    if (stepKey) activateStep(card, stepKey);
+      let data;
+      try { data = JSON.parse(e.data); }
+      catch { return; } // ignore malformed frames
 
-    // Highlight global pipeline diagram
-    document.querySelectorAll('.pipe-step').forEach(el => el.classList.remove('pipe-active'));
-    const pipeId = PIPE_MAP[status];
-    if (pipeId) document.getElementById(pipeId)?.classList.add('pipe-active');
+      const { status, progress, step, title, error, library_saved } = data;
 
-    if (status === 'done') {
-      es.close();
-      allStepsDone(card);
-      card.classList.add('job-done');
-      const actions = card.querySelector('.job-actions');
-      actions.style.display = 'flex';
-      const btn = actions.querySelector('.download-btn');
-      btn.addEventListener('click', () => triggerDownload(jobId, btn));
-      if (library_saved) actions.querySelector('.lib-badge').style.display = 'inline';
+      if (progress != null) setProgress(card, progress);
+      if (step)   setStatus(card, step);
+      if (title)  updateTitle(card, title);
+
+      const stepKey = INLINE_MAP[status];
+      if (stepKey) activateStep(card, stepKey);
+
       document.querySelectorAll('.pipe-step').forEach(el => el.classList.remove('pipe-active'));
-    }
+      const pipeId = PIPE_MAP[status];
+      if (pipeId) document.getElementById(pipeId)?.classList.add('pipe-active');
 
-    if (status === 'error') {
-      es.close();
-      card.classList.add('job-error');
-      setStatus(card, `✗ ${error || step}`);
-    }
+      if (status === 'done') {
+        es.close();
+        allStepsDone(card);
+        card.classList.add('job-done');
+        card.classList.remove('job-error');
+        const actions = card.querySelector('.job-actions');
+        actions.style.display = 'flex';
+        const btn = actions.querySelector('.download-btn');
+        btn.addEventListener('click', () => triggerDownload(jobId, btn));
+        if (library_saved) actions.querySelector('.lib-badge').style.display = 'inline';
+        document.querySelectorAll('.pipe-step').forEach(el => el.classList.remove('pipe-active'));
+      }
 
-    if (status === 'not_found') {
-      es.close();
-      card.classList.add('job-error');
-      setStatus(card, '✗ Job not found on server.');
-    }
-  };
+      if (status === 'error') {
+        es.close();
+        card.classList.add('job-error');
+        setStatus(card, `✗ ${error || step}`);
+      }
 
-  es.onerror = () => {
-    if (!card.classList.contains('job-done')) {
+      if (status === 'not_found') {
+        es.close();
+        card.classList.add('job-error');
+        setStatus(card, '✗ Job not found on server.');
+      }
+    };
+
+    es.onerror = () => {
       es.close();
-      setStatus(card, '✗ Connection lost. The server may still be processing.');
-      card.classList.add('job-error');
-    }
-  };
+      if (card.classList.contains('job-done') || card.classList.contains('job-error')) return;
+      retries++;
+      if (retries <= MAX_RETRIES) {
+        const delay = Math.min(2000 * retries, 12000);
+        setStatus(card, `⏳ Reconnecting… (${retries}/${MAX_RETRIES})`);
+        setTimeout(connect, delay);
+      } else {
+        card.classList.add('job-error');
+        setStatus(card, '✗ Lost connection after several retries. Refresh the page to check status.');
+      }
+    };
+  }
+
+  connect();
 }
 
 // ── Download ──────────────────────────────────────────────────────────────────
