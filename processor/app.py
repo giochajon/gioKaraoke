@@ -16,6 +16,7 @@ import random
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import uuid
 from typing import Optional
 
@@ -457,6 +458,16 @@ SONGS_PATH = os.environ.get("SONGS_PATH", "/songs")
 yt_jobs: dict[str, dict] = {}
 
 
+def _safe_filename(title: str, maxlen: int = 80) -> str:
+    """Convert a video title to a clean ASCII filename with no % encoding."""
+    # Decompose accented letters (NFD) then drop the combining diacritics
+    nfd = unicodedata.normalize("NFD", title)
+    ascii_str = "".join(c for c in nfd if unicodedata.category(c) != "Mn" and c.isascii())
+    # Keep only alphanumeric, spaces, hyphens, underscores
+    safe = "".join(c for c in ascii_str if c.isalnum() or c in " _-").strip()
+    return safe[:maxlen] or "audio"
+
+
 class YTSubmit(BaseModel):
     url: str
     bitrate: str = "320"
@@ -528,10 +539,7 @@ async def process_youtube_job(
 
         info = await _heartbeat_info()
         title = info.get("title", "audio")
-        safe_title = (
-            "".join(c for c in title if c.isalnum() or c in " _-").strip()[:80]
-            or "audio"
-        )
+        safe_title = _safe_filename(title)
 
         # ── Step 2: Stream extraction notice ─────────────────────────────────
         update_yt_job(job_id, status="extracting", progress=15,
@@ -877,10 +885,7 @@ async def enhance_upload(
         raise HTTPException(400, detail="No file provided.")
 
     orig_name = os.path.splitext(file.filename)[0]
-    safe_title = (
-        "".join(c for c in orig_name if c.isalnum() or c in " _-").strip()[:80]
-        or "audio"
-    )
+    safe_title = _safe_filename(orig_name)
     if bitrate not in ("128", "192", "320"):
         bitrate = "320"
 
