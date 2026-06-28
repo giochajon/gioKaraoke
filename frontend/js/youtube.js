@@ -2,8 +2,6 @@
 
 const urlInput  = document.getElementById('yt-url');
 const submitBtn = document.getElementById('yt-submit');
-const dropZone  = document.getElementById('drop-zone');
-const fileInput = document.getElementById('file-input');
 const jobList   = document.getElementById('yt-job-list');
 
 // ── Pipeline step maps — YouTube path (5 steps) ───────────────────────────────
@@ -25,14 +23,6 @@ const YT_STATUS  = {
   enhancing:  'enhance',
 };
 
-// ── Pipeline step maps — local file path (3 steps) ────────────────────────────
-const LOCAL_STEPS  = ['upload', 'transcode', 'enhance'];
-const LOCAL_STATUS = {
-  queued:     'transcode',   // upload done, waiting to transcode
-  transcoding:'transcode',
-  enhancing:  'enhance',
-};
-
 // ── Bitrate selector ──────────────────────────────────────────────────────────
 let selectedBitrate = '192';
 document.getElementById('bitrate-sel').addEventListener('click', e => {
@@ -42,10 +32,6 @@ document.getElementById('bitrate-sel').addEventListener('click', e => {
   btn.classList.add('active');
   selectedBitrate = btn.dataset.val;
 });
-
-// ── Shared option helpers ─────────────────────────────────────────────────────
-const getEnhance  = () => document.getElementById('opt-enhance').checked;
-const getLibrary  = () => document.getElementById('opt-library').checked;
 
 // ── YouTube URL submit ────────────────────────────────────────────────────────
 submitBtn.addEventListener('click', submitURL);
@@ -65,8 +51,8 @@ async function submitURL() {
       body: JSON.stringify({
         url,
         bitrate: selectedBitrate,
-        enhance: getEnhance(),
-        save_to_library: getLibrary(),
+        enhance: document.getElementById('opt-enhance').checked,
+        save_to_library: document.getElementById('opt-library').checked,
       }),
     });
 
@@ -82,7 +68,7 @@ async function submitURL() {
     }
 
     for (const { job_id, title } of jobs) {
-      const card = createCard(title || url, 'youtube');
+      const card = createCard(title || url);
       watchJob(job_id, card);
     }
 
@@ -95,90 +81,25 @@ async function submitURL() {
   }
 }
 
-// ── Local file drag-and-drop ──────────────────────────────────────────────────
-dropZone.addEventListener('dragover', e => {
-  e.preventDefault();
-  dropZone.classList.add('drag-over');
-});
-['dragleave', 'dragend'].forEach(ev =>
-  dropZone.addEventListener(ev, () => dropZone.classList.remove('drag-over'))
-);
-dropZone.addEventListener('drop', e => {
-  e.preventDefault();
-  dropZone.classList.remove('drag-over');
-  handleFiles([...e.dataTransfer.files]);
-});
-fileInput.addEventListener('change', () => {
-  handleFiles([...fileInput.files]);
-  fileInput.value = '';
-});
-
-function handleFiles(files) {
-  const audio = files.filter(f => f.type.startsWith('audio/') || /\.(mp3|wav|flac|aac|m4a|ogg|opus|wma|aiff?)$/i.test(f.name));
-  audio.forEach(startLocalJob);
-  const skipped = files.length - audio.length;
-  if (skipped) showToast(`Skipped ${skipped} non-audio file(s).`);
-}
-
-async function startLocalJob(file) {
-  const card = createCard(file.name, 'local');
-  activateCardStep(card, 'upload', LOCAL_STEPS);  // show upload as active
-  setStatus(card, 'Uploading…');
-
-  const form = new FormData();
-  form.append('file', file);
-  form.append('bitrate', selectedBitrate);
-  form.append('enhance', String(getEnhance()));
-  form.append('save_to_library', String(getLibrary()));
-
-  let jobId;
-  try {
-    const res = await fetch('/api/youtube/enhance-upload', { method: 'POST', body: form });
-    if (!res.ok) {
-      const { detail } = await res.json().catch(() => ({}));
-      throw new Error(detail || `Upload failed (${res.status})`);
-    }
-    ({ job_id: jobId } = await res.json());
-  } catch (err) {
-    setStatus(card, `✗ ${err.message}`);
-    card.classList.add('job-error');
-    return;
-  }
-
-  card.dataset.jobId = jobId;
-  setProgress(card, 8);
-  setStatus(card, 'Queued — waiting for processing slot…');
-  activateCardStep(card, 'transcode', LOCAL_STEPS); // upload done
-  watchJob(jobId, card);
-}
-
 // ── Job card ──────────────────────────────────────────────────────────────────
-function createCard(label, type) {
+function createCard(label) {
   const card = document.createElement('div');
   card.className = 'job-card';
-  card.dataset.cardType = type;
-
-  const stepsHTML = type === 'local'
-    ? `<span class="jstep pending" data-step="upload">📤 Upload</span>
-       <span class="jstep-sep">›</span>
-       <span class="jstep pending" data-step="transcode">🎵 Transcode</span>
-       <span class="jstep-sep">›</span>
-       <span class="jstep pending" data-step="enhance">✨ Enhance</span>`
-    : `<span class="jstep pending" data-step="parse">🔗 Parse</span>
-       <span class="jstep-sep">›</span>
-       <span class="jstep pending" data-step="extract">📡 Extract</span>
-       <span class="jstep-sep">›</span>
-       <span class="jstep pending" data-step="download">⬇ Download</span>
-       <span class="jstep-sep">›</span>
-       <span class="jstep pending" data-step="transcode">🎵 Transcode</span>
-       <span class="jstep-sep">›</span>
-       <span class="jstep pending" data-step="enhance">✨ Enhance</span>`;
-
   card.innerHTML = `
     <div class="job-header">
       <span class="job-name">🎵 ${esc(label)}</span>
     </div>
-    <div class="job-steps">${stepsHTML}</div>
+    <div class="job-steps">
+      <span class="jstep pending" data-step="parse">🔗 Parse</span>
+      <span class="jstep-sep">›</span>
+      <span class="jstep pending" data-step="extract">📡 Extract</span>
+      <span class="jstep-sep">›</span>
+      <span class="jstep pending" data-step="download">⬇ Download</span>
+      <span class="jstep-sep">›</span>
+      <span class="jstep pending" data-step="transcode">🎵 Transcode</span>
+      <span class="jstep-sep">›</span>
+      <span class="jstep pending" data-step="enhance">✨ Enhance</span>
+    </div>
     <div class="job-progress-bar"><div class="job-progress-fill"></div></div>
     <div class="job-status">Queued…</div>
     <div class="job-actions" style="display:none;align-items:center;gap:12px;">
@@ -222,7 +143,6 @@ function allStepsDone(card) {
 
 // ── SSE watcher (with auto-reconnect) ────────────────────────────────────────
 function watchJob(jobId, card) {
-  const isLocal = card.dataset.cardType === 'local';
   let retries = 0;
   const MAX_RETRIES = 6;
 
@@ -239,19 +159,12 @@ function watchJob(jobId, card) {
       const { status, progress, step, title, error, library_saved } = data;
 
       if (progress != null) setProgress(card, progress);
-      if (step)             setStatus(card, step);
-      if (title && !isLocal) updateTitle(card, title);
+      if (step)   setStatus(card, step);
+      if (title)  updateTitle(card, title);
 
-      // Activate inline step based on card type
-      if (isLocal) {
-        const stepKey = LOCAL_STATUS[status];
-        if (stepKey) activateCardStep(card, stepKey, LOCAL_STEPS);
-      } else {
-        const stepKey = YT_STATUS[status];
-        if (stepKey) activateCardStep(card, stepKey, YT_STEPS);
-      }
+      const stepKey = YT_STATUS[status];
+      if (stepKey) activateCardStep(card, stepKey, YT_STEPS);
 
-      // Highlight global pipeline diagram (same mapping for both types)
       document.querySelectorAll('.pipe-step').forEach(el => el.classList.remove('pipe-active'));
       const pipeId = PIPE_MAP[status];
       if (pipeId) document.getElementById(pipeId)?.classList.add('pipe-active');

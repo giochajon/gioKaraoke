@@ -19,7 +19,7 @@
 
   <div class="conv-wrap">
     <h2>🎵 YouTube to MP3</h2>
-    <p>Download any YouTube video as MP3 — or drop a local audio file to transcode and enhance it. Choose your quality, apply optional AI audio processing, and download to your device or save to the karaoke library.</p>
+    <p>Paste any YouTube video or playlist link. Choose your quality, apply optional AI audio processing, and download the MP3 directly to your device or save it to the karaoke library.</p>
 
     <!-- Pipeline diagram -->
     <div class="pipeline">
@@ -79,21 +79,6 @@
         <input type="text" id="yt-url" class="yt-url-input"
                placeholder="https://www.youtube.com/watch?v=… or playlist URL">
         <button class="big-btn" id="yt-submit">▶ Convert</button>
-      </div>
-    </div>
-
-    <!-- Divider -->
-    <div class="yt-divider"><span>or convert a local audio file</span></div>
-
-    <!-- Drop zone for local files -->
-    <div class="drop-zone" id="drop-zone">
-      <div class="drop-inner">
-        <div class="drop-icon">🎵</div>
-        <p class="drop-text">Drag &amp; drop audio files here</p>
-        <p class="drop-sub">MP3 · WAV · FLAC · AAC · M4A · OGG and more</p>
-        <p class="drop-sub">or</p>
-        <label class="big-btn" for="file-input">Choose Files</label>
-        <input type="file" id="file-input" accept="audio/*" multiple hidden>
       </div>
     </div>
 
