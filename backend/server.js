@@ -255,38 +255,43 @@ app.get('/api/admin/stats', async (req, res) => {
 // Pipes all /api/convert/* requests to the processor container.
 // No body buffering — multipart uploads and SSE streams pass through as-is.
 
-app.use('/api/convert', (req, res) => {
-  const target = new URL(PROCESSOR_URL);
-  const options = {
-    hostname: target.hostname,
-    port: parseInt(target.port) || 80,
-    path: '/api/convert' + req.url,
-    method: req.method,
-    headers: {
-      ...req.headers,
-      host: target.host,
-      // Disable nginx-style proxy buffering so SSE chunks flush immediately
-      'x-accel-buffering': 'no',
-    },
+function proxyToProcessor(prefix) {
+  return (req, res) => {
+    const target = new URL(PROCESSOR_URL);
+    const options = {
+      hostname: target.hostname,
+      port: parseInt(target.port) || 80,
+      path: prefix + req.url,
+      method: req.method,
+      headers: {
+        ...req.headers,
+        host: target.host,
+        'x-accel-buffering': 'no',
+      },
+    };
+
+    const proxyReq = http.request(options, proxyRes => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res, { end: true });
+    });
+
+    proxyReq.setTimeout(0);
+
+    proxyReq.on('error', () => {
+      if (!res.headersSent) {
+        res.status(503).json({
+          error: 'Processor service is unavailable. Make sure the processor container is running.',
+        });
+      }
+    });
+
+    req.pipe(proxyReq, { end: true });
   };
+}
 
-  const proxyReq = http.request(options, proxyRes => {
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    proxyRes.pipe(res, { end: true });
-  });
+app.use('/api/youtube', proxyToProcessor('/api/youtube'));
 
-  proxyReq.setTimeout(0); // no timeout — processing can take several minutes
-
-  proxyReq.on('error', () => {
-    if (!res.headersSent) {
-      res.status(503).json({
-        error: 'Processor service is unavailable. Make sure the processor container is running.',
-      });
-    }
-  });
-
-  req.pipe(proxyReq, { end: true });
-});
+app.use('/api/convert', proxyToProcessor('/api/convert'));
 
 // SPA fallback
 app.get('*', (req, res) => {

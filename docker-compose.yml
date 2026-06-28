@@ -43,9 +43,12 @@ services:
     container_name: giokaraoke-processor
     environment:
       - MODEL_CACHE=/model_cache
+      - SONGS_PATH=/songs
     volumes:
       # Persist AI model downloads across container restarts (~500 MB)
       - model_cache:/model_cache
+      # Songs library — writable so YouTube→MP3 can save directly to host
+      - ${SONGS_PATH:-./songs}:/songs
       # Temp working dir: OS-managed, no persistent user data
     restart: unless-stopped
     healthcheck:

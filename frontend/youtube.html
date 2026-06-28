@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gioKaraoke — YouTube to MP3</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body style="overflow: auto;">
+<div class="app" style="display:block; height:auto; min-height:100vh;">
+  <header>
+    <h1>🎤 gioKaraoke</h1>
+    <nav class="header-nav">
+      <a href="/">◀ Back to Player</a>
+      <a href="/convert.html">🎬 Karaoke Creator</a>
+      <a href="/admin.html">⚙ Library</a>
+    </nav>
+  </header>
+
+  <div class="conv-wrap">
+    <h2>🎵 YouTube to MP3</h2>
+    <p>Paste any YouTube video or playlist link. Choose your quality, optionally enhance with AI, and download the MP3 directly to your device — or save it straight into the karaoke library.</p>
+
+    <!-- Pipeline diagram -->
+    <div class="pipeline">
+      <div class="pipe-step" id="ps-parse">
+        <div class="pipe-icon">🔗</div>
+        <div class="pipe-label">URL<br>Parse</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step" id="ps-extract">
+        <div class="pipe-icon">📡</div>
+        <div class="pipe-label">Stream<br>Extract</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step" id="ps-download">
+        <div class="pipe-icon">⬇</div>
+        <div class="pipe-label">Download<br>Audio</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step" id="ps-transcode">
+        <div class="pipe-icon">🎵</div>
+        <div class="pipe-label">Transcode<br>MP3</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step" id="ps-enhance">
+        <div class="pipe-icon">✨</div>
+        <div class="pipe-label">AI<br>Enhance</div>
+      </div>
+    </div>
+
+    <!-- URL input + options -->
+    <div class="yt-input-section">
+      <div class="yt-url-row">
+        <input type="text" id="yt-url" class="yt-url-input"
+               placeholder="https://www.youtube.com/watch?v=… or playlist URL">
+        <button class="big-btn" id="yt-submit">▶ Convert</button>
+      </div>
+
+      <div class="yt-options">
+        <div class="yt-opt-group">
+          <span class="yt-opt-label">Bitrate</span>
+          <div class="yt-bitrate-sel" id="bitrate-sel">
+            <button class="yt-bit-btn" data-val="128">128 kbps</button>
+            <button class="yt-bit-btn active" data-val="192">192 kbps</button>
+            <button class="yt-bit-btn" data-val="320">320 kbps</button>
+          </div>
+        </div>
+
+        <label class="yt-toggle-label">
+          <input type="checkbox" id="opt-enhance">
+          <span class="yt-toggle-txt">✨ AI Enhance</span>
+          <span class="yt-toggle-sub">Noise reduction + EBU R128 loudness normalization</span>
+        </label>
+
+        <label class="yt-toggle-label">
+          <input type="checkbox" id="opt-library">
+          <span class="yt-toggle-txt">📚 Save to Library</span>
+          <span class="yt-toggle-sub">Copy MP3 into the karaoke song library on this host</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Job list -->
+    <div id="yt-job-list"></div>
+
+    <!-- Info footer -->
+    <div class="admin-card" style="margin-top:20px;">
+      <h3>How it works</h3>
+      <p style="font-size:0.85rem;margin-bottom:8px;">
+        All processing runs locally using open-source tools — no third-party services involved:
+      </p>
+      <ul class="info-list">
+        <li><strong>yt-dlp</strong> — extracts video metadata, locates the best audio-only stream (AAC or Opus), and downloads it with real-time speed reporting</li>
+        <li><strong>FFmpeg libmp3lame</strong> — transcodes the raw stream to MP3 at your chosen bitrate with embedded ID3 title tags</li>
+        <li><strong>FFmpeg anlmdn</strong> — AI non-local means denoising to reduce background hiss and noise (optional)</li>
+        <li><strong>FFmpeg loudnorm</strong> — EBU R128 broadcast loudness normalization for consistent playback volume (optional)</li>
+      </ul>
+      <p style="font-size:0.8rem; margin-top:10px; color: var(--text-dim);">
+        ⚠ Playlists are capped at 50 videos per batch. Files are not stored in the container — they are delivered directly to your browser or saved to the host library volume.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script src="/js/youtube.js"></script>
+</body>
+</html>

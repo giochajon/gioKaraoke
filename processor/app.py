@@ -22,6 +22,7 @@ from typing import Optional
 from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image, ImageDraw, ImageFont
+from pydantic import BaseModel
 
 MODEL_CACHE = os.environ.get("MODEL_CACHE", "/tmp/model_cache")
 WHISPER_CACHE = os.path.join(MODEL_CACHE, "whisper")
@@ -448,3 +449,278 @@ async def download(job_id: str, background_tasks: BackgroundTasks):
 @app.get("/health")
 async def health():
     return {"status": "ok", "jobs": len(jobs)}
+
+
+# ── YouTube → MP3 ─────────────────────────────────────────────────────────────
+
+SONGS_PATH = os.environ.get("SONGS_PATH", "/songs")
+yt_jobs: dict[str, dict] = {}
+
+
+class YTSubmit(BaseModel):
+    url: str
+    bitrate: str = "320"
+    enhance: bool = False
+    save_to_library: bool = False
+
+
+def update_yt_job(job_id: str, **kwargs) -> None:
+    if job_id in yt_jobs:
+        yt_jobs[job_id].update(kwargs)
+
+
+async def process_youtube_job(
+    job_id: str,
+    url: str,
+    bitrate: str,
+    enhance: bool,
+    save_to_library: bool,
+    tmpdir: str,
+) -> None:
+    loop = asyncio.get_event_loop()
+    try:
+        # ── Step 1: URL Parse + metadata ──────────────────────────────────────
+        update_yt_job(job_id, status="parsing", progress=5,
+                      step="Parsing URL and fetching video metadata…")
+
+        def _get_info():
+            import yt_dlp
+            with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True,
+                                    "no_warnings": True}) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        info = await loop.run_in_executor(None, _get_info)
+        title = info.get("title", "audio")
+        safe_title = (
+            "".join(c for c in title if c.isalnum() or c in " _-").strip()[:80]
+            or "audio"
+        )
+
+        # ── Step 2: Stream extraction notice ─────────────────────────────────
+        update_yt_job(job_id, status="extracting", progress=15,
+                      step=f'Locating best audio-only stream for "{title}"…',
+                      title=title)
+
+        # ── Step 3: Download ──────────────────────────────────────────────────
+        def _download():
+            import yt_dlp
+
+            def _hook(d):
+                if d["status"] == "downloading":
+                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                    done = d.get("downloaded_bytes", 0)
+                    pct = 15 + int((done / total) * 35) if total else 20
+                    speed = d.get("speed") or 0
+                    spd = f" — {speed / 1024:.0f} KB/s" if speed else ""
+                    update_yt_job(job_id, status="downloading", progress=pct,
+                                  step=f"Downloading audio stream{spd}…")
+
+            opts = {
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(tmpdir, "raw_audio.%(ext)s"),
+                "progress_hooks": [_hook],
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+
+        await loop.run_in_executor(None, _download)
+
+        raw_files = [f for f in os.listdir(tmpdir) if f.startswith("raw_audio.")]
+        if not raw_files:
+            raise RuntimeError("Download produced no output file.")
+        raw_audio = os.path.join(tmpdir, raw_files[0])
+
+        # ── Step 4: Transcode to MP3 ──────────────────────────────────────────
+        update_yt_job(job_id, status="transcoding", progress=60,
+                      step=f"Transcoding to MP3 at {bitrate} kbps…")
+        mp3_path = os.path.join(tmpdir, f"{safe_title}.mp3")
+
+        def _transcode():
+            cmd = [
+                "ffmpeg", "-y", "-i", raw_audio,
+                "-vn", "-c:a", "libmp3lame", "-b:a", f"{bitrate}k",
+                "-id3v2_version", "3", "-metadata", f"title={title}",
+                mp3_path,
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"FFmpeg transcode failed:\n{r.stderr[-600:]}")
+
+        await loop.run_in_executor(None, _transcode)
+        output_path = mp3_path
+
+        # ── Step 5: AI Enhancement (optional) ────────────────────────────────
+        if enhance:
+            update_yt_job(job_id, status="enhancing", progress=78,
+                          step="AI enhancement — non-local means denoising + EBU R128 normalization…")
+            enhanced_path = os.path.join(tmpdir, f"{safe_title}_enhanced.mp3")
+
+            def _enhance():
+                # anlmdn = AI non-local means denoising; loudnorm = EBU R128 normalization
+                cmd = [
+                    "ffmpeg", "-y", "-i", mp3_path,
+                    "-af", (
+                        "anlmdn=s=7:p=0.002:r=0.002:m=15,"
+                        "loudnorm=I=-16:TP=-1.5:LRA=11"
+                    ),
+                    "-c:a", "libmp3lame", "-b:a", f"{bitrate}k",
+                    "-id3v2_version", "3", "-metadata", f"title={title}",
+                    enhanced_path,
+                ]
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    raise RuntimeError(f"Enhancement failed:\n{r.stderr[-600:]}")
+
+            await loop.run_in_executor(None, _enhance)
+            output_path = enhanced_path
+
+        # ── Save to library ───────────────────────────────────────────────────
+        library_saved = False
+        if save_to_library and os.path.isdir(SONGS_PATH):
+            dest = os.path.join(SONGS_PATH, f"{safe_title}.mp3")
+            shutil.copy2(output_path, dest)
+            library_saved = True
+
+        update_yt_job(job_id, status="done", progress=100,
+                      step="Done! Your MP3 is ready.",
+                      output_path=output_path,
+                      safe_title=safe_title,
+                      library_saved=library_saved)
+
+    except Exception as exc:
+        err = str(exc)
+        update_yt_job(job_id, status="error", progress=0,
+                      step=f"Error: {err}", error=err)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@app.post("/api/youtube/submit")
+async def youtube_submit(body: YTSubmit, background_tasks: BackgroundTasks):
+    url = body.url.strip()
+    if not url:
+        raise HTTPException(400, detail="YouTube URL is required.")
+    if not any(h in url for h in ("youtube.com", "youtu.be", "yt.be")):
+        raise HTTPException(400, detail="Please provide a valid YouTube URL.")
+    bitrate = body.bitrate if body.bitrate in ("128", "192", "320") else "320"
+
+    is_playlist = "list=" in url or "/playlist" in url
+
+    if is_playlist:
+        def _playlist_info():
+            import yt_dlp
+            opts = {
+                "quiet": True,
+                "skip_download": True,
+                "extract_flat": "in_playlist",
+                "no_warnings": True,
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        loop = asyncio.get_event_loop()
+        info = await loop.run_in_executor(None, _playlist_info)
+        entries = (info.get("entries") or [])[:50]
+        playlist_title = info.get("title", "Playlist")
+
+        jobs_out = []
+        for entry in entries:
+            if not entry:
+                continue
+            vid_id = entry.get("id", "")
+            vid_url = (entry.get("url") or "").strip()
+            if "youtube.com" not in vid_url and "youtu.be" not in vid_url:
+                vid_url = f"https://www.youtube.com/watch?v={vid_id}" if vid_id else None
+            if not vid_url:
+                continue
+            vid_title = entry.get("title", "Unknown")
+            job_id = str(uuid.uuid4())
+            tmpdir = tempfile.mkdtemp(prefix="yt-mp3-")
+            yt_jobs[job_id] = {
+                "status": "queued", "progress": 2,
+                "step": "Queued — waiting for processing slot…",
+                "url": vid_url, "bitrate": bitrate, "enhance": body.enhance,
+                "tmpdir": tmpdir, "title": vid_title, "output_path": None,
+                "safe_title": None, "library_saved": False, "error": None,
+            }
+            background_tasks.add_task(
+                process_youtube_job, job_id, vid_url, bitrate,
+                body.enhance, body.save_to_library, tmpdir,
+            )
+            jobs_out.append({"job_id": job_id, "title": vid_title})
+
+        return {"jobs": jobs_out, "is_playlist": True, "playlist_title": playlist_title}
+
+    # Single video
+    job_id = str(uuid.uuid4())
+    tmpdir = tempfile.mkdtemp(prefix="yt-mp3-")
+    yt_jobs[job_id] = {
+        "status": "queued", "progress": 2,
+        "step": "Queued — waiting for processing slot…",
+        "url": url, "bitrate": bitrate, "enhance": body.enhance,
+        "tmpdir": tmpdir, "title": None, "output_path": None,
+        "safe_title": None, "library_saved": False, "error": None,
+    }
+    background_tasks.add_task(
+        process_youtube_job, job_id, url, bitrate,
+        body.enhance, body.save_to_library, tmpdir,
+    )
+    return {"jobs": [{"job_id": job_id, "title": None}], "is_playlist": False}
+
+
+@app.get("/api/youtube/status/{job_id}")
+async def youtube_status(job_id: str):
+    async def _gen():
+        while True:
+            job = yt_jobs.get(job_id)
+            if job is None:
+                yield f"data: {json.dumps({'status': 'not_found'})}\n\n"
+                break
+            payload = {
+                "status": job["status"],
+                "progress": job["progress"],
+                "step": job["step"],
+                "title": job.get("title"),
+                "error": job.get("error"),
+                "library_saved": job.get("library_saved", False),
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+            if job["status"] in ("done", "error"):
+                break
+            await asyncio.sleep(1.5)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/youtube/download/{job_id}")
+async def youtube_download(job_id: str, background_tasks: BackgroundTasks):
+    job = yt_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="Job not found.")
+    if job["status"] != "done":
+        raise HTTPException(400, detail=f"Job not ready (status: {job['status']}).")
+
+    output_path = job.get("output_path")
+    if not output_path or not os.path.exists(output_path):
+        raise HTTPException(500, detail="Output file missing.")
+
+    tmpdir = job["tmpdir"]
+    safe_title = job.get("safe_title", "audio")
+
+    def _cleanup():
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        yt_jobs.pop(job_id, None)
+
+    background_tasks.add_task(_cleanup)
+
+    return FileResponse(
+        output_path,
+        media_type="audio/mpeg",
+        filename=f"{safe_title}.mp3",
+    )
