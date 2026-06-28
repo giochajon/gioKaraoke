@@ -16,7 +16,6 @@ import random
 import shutil
 import subprocess
 import tempfile
-import unicodedata
 import uuid
 from typing import Optional
 
@@ -458,13 +457,12 @@ SONGS_PATH = os.environ.get("SONGS_PATH", "/songs")
 yt_jobs: dict[str, dict] = {}
 
 
+_UNSAFE_FILENAME_CHARS = set('/\\:*?"<>|\x00')
+
 def _safe_filename(title: str, maxlen: int = 80) -> str:
-    """Convert a video title to a clean ASCII filename with no % encoding."""
-    # Decompose accented letters (NFD) then drop the combining diacritics
-    nfd = unicodedata.normalize("NFD", title)
-    ascii_str = "".join(c for c in nfd if unicodedata.category(c) != "Mn" and c.isascii())
-    # Keep only alphanumeric, spaces, hyphens, underscores
-    safe = "".join(c for c in ascii_str if c.isalnum() or c in " _-").strip()
+    """Strip filesystem-unsafe characters; preserve unicode letters and accents."""
+    safe = "".join(c for c in title if c not in _UNSAFE_FILENAME_CHARS).strip()
+    safe = " ".join(safe.split())  # collapse whitespace
     return safe[:maxlen] or "audio"
 
 

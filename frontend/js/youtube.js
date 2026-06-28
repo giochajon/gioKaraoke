@@ -225,8 +225,7 @@ async function triggerDownload(jobId, btn) {
     const a      = document.createElement('a');
     a.href       = objUrl;
     const cd     = res.headers.get('content-disposition') || '';
-    const match  = cd.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-    a.download   = match ? match[1].replace(/['"]/g, '') : 'audio.mp3';
+    a.download   = parseContentDispositionFilename(cd) || 'audio.mp3';
     a.click();
     setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
     btn.textContent = '✓ Downloaded';
@@ -235,6 +234,22 @@ async function triggerDownload(jobId, btn) {
     btn.textContent = '⬇ Retry Download';
     showToast(`Download failed: ${err.message}`);
   }
+}
+
+// ── Content-Disposition filename parser ──────────────────────────────────────
+// Starlette sends RFC 5987 when the filename contains spaces or non-ASCII:
+//   filename*=utf-8''Siempre%20Reza%20Por%20M%C3%AD.mp3
+// The old regex captured that verbatim, giving "utf-8Siempre%20..." as the name.
+function parseContentDispositionFilename(cd) {
+  // Try filename*=charset''encoded first (RFC 5987)
+  const star = cd.match(/filename\*\s*=\s*(?:[^']*'[^']*')?([^;\s]+)/i);
+  if (star) {
+    try { return decodeURIComponent(star[1]); } catch { return star[1]; }
+  }
+  // Fall back to plain filename="..."
+  const plain = cd.match(/filename\s*=\s*"([^"]+)"/i)
+             || cd.match(/filename\s*=\s*([^;\s]+)/i);
+  return plain ? plain[1] : null;
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
