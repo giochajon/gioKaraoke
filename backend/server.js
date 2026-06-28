@@ -252,25 +252,41 @@ app.get('/api/admin/stats', async (req, res) => {
 });
 
 // ─── Converter proxy → Python processor service ───────────────────────────────
-// Pipes all /api/convert/* requests to the processor container.
-// No body buffering — multipart uploads and SSE streams pass through as-is.
+// Pipes all /api/convert/* and /api/youtube/* requests to the processor.
+//
+// express.json() (above) consumes application/json bodies before any middleware
+// runs. Re-serialise req.body when it has been pre-parsed so the proxy request
+// is properly ended; pipe everything else (multipart, GET, SSE) as normal.
 
 function proxyToProcessor(prefix) {
   return (req, res) => {
     const target = new URL(PROCESSOR_URL);
-    const options = {
-      hostname: target.hostname,
-      port: parseInt(target.port) || 80,
-      path: prefix + req.url,
-      method: req.method,
-      headers: {
-        ...req.headers,
-        host: target.host,
-        'x-accel-buffering': 'no',
-      },
-    };
 
-    const proxyReq = http.request(options, proxyRes => {
+    // If express.json() already parsed the body, re-serialise it into a Buffer
+    // so we can set an explicit Content-Length and call proxyReq.end().
+    // Without this, piping an already-consumed stream never calls end() on the
+    // upstream request and FastAPI waits forever.
+    const preBody = req.body !== undefined
+      ? Buffer.from(JSON.stringify(req.body))
+      : null;
+
+    const headers = {
+      ...req.headers,
+      host: target.host,
+      'x-accel-buffering': 'no',
+    };
+    if (preBody) {
+      headers['content-type']   = 'application/json';
+      headers['content-length'] = preBody.length;
+    }
+
+    const proxyReq = http.request({
+      hostname: target.hostname,
+      port:     parseInt(target.port) || 80,
+      path:     prefix + req.url,
+      method:   req.method,
+      headers,
+    }, proxyRes => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res, { end: true });
     });
@@ -285,7 +301,11 @@ function proxyToProcessor(prefix) {
       }
     });
 
-    req.pipe(proxyReq, { end: true });
+    if (preBody) {
+      proxyReq.end(preBody);
+    } else {
+      req.pipe(proxyReq, { end: true });
+    }
   };
 }
 

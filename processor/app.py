@@ -19,7 +19,7 @@ import tempfile
 import uuid
 from typing import Optional
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel
@@ -782,3 +782,127 @@ async def youtube_download(job_id: str, background_tasks: BackgroundTasks):
         media_type="audio/mpeg",
         filename=f"{safe_title}.mp3",
     )
+
+
+# ── Local audio file → enhanced MP3 ──────────────────────────────────────────
+
+async def process_enhance_job(
+    job_id: str,
+    src_path: str,
+    tmpdir: str,
+    safe_title: str,
+    title: str,
+    bitrate: str,
+    enhance: bool,
+    save_to_library: bool,
+) -> None:
+    import traceback as _tb
+
+    loop = asyncio.get_event_loop()
+    try:
+        # ── Step 1: Transcode to MP3 ──────────────────────────────────────────
+        update_yt_job(job_id, status="transcoding", progress=20,
+                      step=f"Transcoding to MP3 at {bitrate} kbps…")
+        mp3_path = os.path.join(tmpdir, f"{safe_title}.mp3")
+
+        def _transcode():
+            cmd = [
+                "ffmpeg", "-y", "-i", src_path,
+                "-vn", "-c:a", "libmp3lame", "-b:a", f"{bitrate}k",
+                "-id3v2_version", "3", "-metadata", f"title={title}",
+                mp3_path,
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"FFmpeg transcode failed:\n{r.stderr[-600:]}")
+
+        await loop.run_in_executor(None, _transcode)
+        output_path = mp3_path
+
+        # ── Step 2: AI Enhancement (optional) ────────────────────────────────
+        if enhance:
+            update_yt_job(job_id, status="enhancing", progress=70,
+                          step="AI enhancement — noise reduction + EBU R128 normalization…")
+            enhanced_path = os.path.join(tmpdir, f"{safe_title}_enhanced.mp3")
+
+            def _enhance():
+                cmd = [
+                    "ffmpeg", "-y", "-i", mp3_path,
+                    "-af", (
+                        "anlmdn=s=7:p=0.002:r=0.002:m=15,"
+                        "loudnorm=I=-16:TP=-1.5:LRA=11"
+                    ),
+                    "-c:a", "libmp3lame", "-b:a", f"{bitrate}k",
+                    "-id3v2_version", "3", "-metadata", f"title={title}",
+                    enhanced_path,
+                ]
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    raise RuntimeError(f"Enhancement failed:\n{r.stderr[-600:]}")
+
+            await loop.run_in_executor(None, _enhance)
+            output_path = enhanced_path
+
+        # ── Save to library ───────────────────────────────────────────────────
+        library_saved = False
+        if save_to_library and os.path.isdir(SONGS_PATH):
+            dest = os.path.join(SONGS_PATH, f"{safe_title}.mp3")
+            shutil.copy2(output_path, dest)
+            library_saved = True
+
+        update_yt_job(job_id, status="done", progress=100,
+                      step="Done! Your MP3 is ready.",
+                      output_path=output_path,
+                      safe_title=safe_title,
+                      library_saved=library_saved)
+
+    except Exception as exc:
+        err_msg = str(exc)
+        print(f"[yt-enh] Job {job_id} failed: {err_msg}", flush=True)
+        _tb.print_exc()
+        update_yt_job(job_id, status="error", progress=0,
+                      step=f"Error: {err_msg}", error=err_msg)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@app.post("/api/youtube/enhance-upload")
+async def enhance_upload(
+    background_tasks: BackgroundTasks,
+    file: UploadFile,
+    bitrate: str = Form("320"),
+    enhance: bool = Form(True),
+    save_to_library: bool = Form(False),
+):
+    if not file.filename:
+        raise HTTPException(400, detail="No file provided.")
+
+    orig_name = os.path.splitext(file.filename)[0]
+    safe_title = (
+        "".join(c for c in orig_name if c.isalnum() or c in " _-").strip()[:80]
+        or "audio"
+    )
+    if bitrate not in ("128", "192", "320"):
+        bitrate = "320"
+
+    job_id = str(uuid.uuid4())
+    tmpdir = tempfile.mkdtemp(prefix="yt-enh-")
+    ext = os.path.splitext(file.filename)[1].lower() or ".audio"
+    src_path = os.path.join(tmpdir, f"source{ext}")
+
+    content = await file.read()
+    with open(src_path, "wb") as fh:
+        fh.write(content)
+
+    yt_jobs[job_id] = {
+        "status": "queued", "progress": 5,
+        "step": "Queued — waiting for processing slot…",
+        "url": None, "bitrate": bitrate, "enhance": enhance,
+        "tmpdir": tmpdir, "title": orig_name, "output_path": None,
+        "safe_title": safe_title, "library_saved": False, "error": None,
+    }
+
+    background_tasks.add_task(
+        process_enhance_job, job_id, src_path, tmpdir,
+        safe_title, orig_name, bitrate, enhance, save_to_library,
+    )
+    return {"job_id": job_id, "title": orig_name}

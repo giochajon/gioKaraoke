@@ -1,10 +1,12 @@
-/* gioKaraoke — YouTube to MP3 */
+/* gioKaraoke — YouTube to MP3 / local audio enhancer */
 
 const urlInput  = document.getElementById('yt-url');
 const submitBtn = document.getElementById('yt-submit');
+const dropZone  = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
 const jobList   = document.getElementById('yt-job-list');
 
-// ── Pipeline step maps ────────────────────────────────────────────────────────
+// ── Pipeline step maps — YouTube path (5 steps) ───────────────────────────────
 const PIPE_MAP = {
   parsing:    'ps-parse',
   extracting: 'ps-extract',
@@ -14,11 +16,19 @@ const PIPE_MAP = {
   done:       'ps-enhance',
 };
 
-const INLINE_ORDER = ['parse', 'extract', 'download', 'transcode', 'enhance'];
-const INLINE_MAP   = {
+const YT_STEPS   = ['parse', 'extract', 'download', 'transcode', 'enhance'];
+const YT_STATUS  = {
   parsing:    'parse',
   extracting: 'extract',
   downloading:'download',
+  transcoding:'transcode',
+  enhancing:  'enhance',
+};
+
+// ── Pipeline step maps — local file path (3 steps) ────────────────────────────
+const LOCAL_STEPS  = ['upload', 'transcode', 'enhance'];
+const LOCAL_STATUS = {
+  queued:     'transcode',   // upload done, waiting to transcode
   transcoding:'transcode',
   enhancing:  'enhance',
 };
@@ -33,7 +43,11 @@ document.getElementById('bitrate-sel').addEventListener('click', e => {
   selectedBitrate = btn.dataset.val;
 });
 
-// ── Submit ────────────────────────────────────────────────────────────────────
+// ── Shared option helpers ─────────────────────────────────────────────────────
+const getEnhance  = () => document.getElementById('opt-enhance').checked;
+const getLibrary  = () => document.getElementById('opt-library').checked;
+
+// ── YouTube URL submit ────────────────────────────────────────────────────────
 submitBtn.addEventListener('click', submitURL);
 urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') submitURL(); });
 
@@ -51,8 +65,8 @@ async function submitURL() {
       body: JSON.stringify({
         url,
         bitrate: selectedBitrate,
-        enhance: document.getElementById('opt-enhance').checked,
-        save_to_library: document.getElementById('opt-library').checked,
+        enhance: getEnhance(),
+        save_to_library: getLibrary(),
       }),
     });
 
@@ -68,7 +82,7 @@ async function submitURL() {
     }
 
     for (const { job_id, title } of jobs) {
-      const card = createCard(title || url, job_id);
+      const card = createCard(title || url, 'youtube');
       watchJob(job_id, card);
     }
 
@@ -81,26 +95,90 @@ async function submitURL() {
   }
 }
 
+// ── Local file drag-and-drop ──────────────────────────────────────────────────
+dropZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  dropZone.classList.add('drag-over');
+});
+['dragleave', 'dragend'].forEach(ev =>
+  dropZone.addEventListener(ev, () => dropZone.classList.remove('drag-over'))
+);
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  handleFiles([...e.dataTransfer.files]);
+});
+fileInput.addEventListener('change', () => {
+  handleFiles([...fileInput.files]);
+  fileInput.value = '';
+});
+
+function handleFiles(files) {
+  const audio = files.filter(f => f.type.startsWith('audio/') || /\.(mp3|wav|flac|aac|m4a|ogg|opus|wma|aiff?)$/i.test(f.name));
+  audio.forEach(startLocalJob);
+  const skipped = files.length - audio.length;
+  if (skipped) showToast(`Skipped ${skipped} non-audio file(s).`);
+}
+
+async function startLocalJob(file) {
+  const card = createCard(file.name, 'local');
+  activateCardStep(card, 'upload', LOCAL_STEPS);  // show upload as active
+  setStatus(card, 'Uploading…');
+
+  const form = new FormData();
+  form.append('file', file);
+  form.append('bitrate', selectedBitrate);
+  form.append('enhance', String(getEnhance()));
+  form.append('save_to_library', String(getLibrary()));
+
+  let jobId;
+  try {
+    const res = await fetch('/api/youtube/enhance-upload', { method: 'POST', body: form });
+    if (!res.ok) {
+      const { detail } = await res.json().catch(() => ({}));
+      throw new Error(detail || `Upload failed (${res.status})`);
+    }
+    ({ job_id: jobId } = await res.json());
+  } catch (err) {
+    setStatus(card, `✗ ${err.message}`);
+    card.classList.add('job-error');
+    return;
+  }
+
+  card.dataset.jobId = jobId;
+  setProgress(card, 8);
+  setStatus(card, 'Queued — waiting for processing slot…');
+  activateCardStep(card, 'transcode', LOCAL_STEPS); // upload done
+  watchJob(jobId, card);
+}
+
 // ── Job card ──────────────────────────────────────────────────────────────────
-function createCard(label, jobId) {
+function createCard(label, type) {
   const card = document.createElement('div');
   card.className = 'job-card';
-  card.dataset.jobId = jobId;
+  card.dataset.cardType = type;
+
+  const stepsHTML = type === 'local'
+    ? `<span class="jstep pending" data-step="upload">📤 Upload</span>
+       <span class="jstep-sep">›</span>
+       <span class="jstep pending" data-step="transcode">🎵 Transcode</span>
+       <span class="jstep-sep">›</span>
+       <span class="jstep pending" data-step="enhance">✨ Enhance</span>`
+    : `<span class="jstep pending" data-step="parse">🔗 Parse</span>
+       <span class="jstep-sep">›</span>
+       <span class="jstep pending" data-step="extract">📡 Extract</span>
+       <span class="jstep-sep">›</span>
+       <span class="jstep pending" data-step="download">⬇ Download</span>
+       <span class="jstep-sep">›</span>
+       <span class="jstep pending" data-step="transcode">🎵 Transcode</span>
+       <span class="jstep-sep">›</span>
+       <span class="jstep pending" data-step="enhance">✨ Enhance</span>`;
+
   card.innerHTML = `
     <div class="job-header">
       <span class="job-name">🎵 ${esc(label)}</span>
     </div>
-    <div class="job-steps">
-      <span class="jstep pending" data-step="parse">🔗 Parse</span>
-      <span class="jstep-sep">›</span>
-      <span class="jstep pending" data-step="extract">📡 Extract</span>
-      <span class="jstep-sep">›</span>
-      <span class="jstep pending" data-step="download">⬇ Download</span>
-      <span class="jstep-sep">›</span>
-      <span class="jstep pending" data-step="transcode">🎵 Transcode</span>
-      <span class="jstep-sep">›</span>
-      <span class="jstep pending" data-step="enhance">✨ Enhance</span>
-    </div>
+    <div class="job-steps">${stepsHTML}</div>
     <div class="job-progress-bar"><div class="job-progress-fill"></div></div>
     <div class="job-status">Queued…</div>
     <div class="job-actions" style="display:none;align-items:center;gap:12px;">
@@ -112,6 +190,7 @@ function createCard(label, jobId) {
   return card;
 }
 
+// ── Step helpers ──────────────────────────────────────────────────────────────
 function setProgress(card, pct) {
   card.querySelector('.job-progress-fill').style.width = pct + '%';
 }
@@ -124,8 +203,8 @@ function updateTitle(card, title) {
   card.querySelector('.job-name').textContent = `🎵 ${title}`;
 }
 
-function activateStep(card, stepKey) {
-  const idx = INLINE_ORDER.indexOf(stepKey);
+function activateCardStep(card, stepKey, order) {
+  const idx = order.indexOf(stepKey);
   card.querySelectorAll('.jstep').forEach((el, i) => {
     el.classList.remove('pending', 'active', 'done');
     if (i < idx)        el.classList.add('done');
@@ -143,6 +222,7 @@ function allStepsDone(card) {
 
 // ── SSE watcher (with auto-reconnect) ────────────────────────────────────────
 function watchJob(jobId, card) {
+  const isLocal = card.dataset.cardType === 'local';
   let retries = 0;
   const MAX_RETRIES = 6;
 
@@ -150,21 +230,28 @@ function watchJob(jobId, card) {
     const es = new EventSource(`/api/youtube/status/${jobId}`);
 
     es.onmessage = e => {
-      retries = 0; // reset backoff on each good message
+      retries = 0;
 
       let data;
       try { data = JSON.parse(e.data); }
-      catch { return; } // ignore malformed frames
+      catch { return; }
 
       const { status, progress, step, title, error, library_saved } = data;
 
       if (progress != null) setProgress(card, progress);
-      if (step)   setStatus(card, step);
-      if (title)  updateTitle(card, title);
+      if (step)             setStatus(card, step);
+      if (title && !isLocal) updateTitle(card, title);
 
-      const stepKey = INLINE_MAP[status];
-      if (stepKey) activateStep(card, stepKey);
+      // Activate inline step based on card type
+      if (isLocal) {
+        const stepKey = LOCAL_STATUS[status];
+        if (stepKey) activateCardStep(card, stepKey, LOCAL_STEPS);
+      } else {
+        const stepKey = YT_STATUS[status];
+        if (stepKey) activateCardStep(card, stepKey, YT_STEPS);
+      }
 
+      // Highlight global pipeline diagram (same mapping for both types)
       document.querySelectorAll('.pipe-step').forEach(el => el.classList.remove('pipe-active'));
       const pipeId = PIPE_MAP[status];
       if (pipeId) document.getElementById(pipeId)?.classList.add('pipe-active');
@@ -220,18 +307,18 @@ async function triggerDownload(jobId, btn) {
   try {
     const res = await fetch(`/api/youtube/download/${jobId}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const blob = await res.blob();
+    const blob   = await res.blob();
     const objUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = objUrl;
-    const cd = res.headers.get('content-disposition') || '';
-    const match = cd.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-    a.download = match ? match[1].replace(/['"]/g, '') : 'audio.mp3';
+    const a      = document.createElement('a');
+    a.href       = objUrl;
+    const cd     = res.headers.get('content-disposition') || '';
+    const match  = cd.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+    a.download   = match ? match[1].replace(/['"]/g, '') : 'audio.mp3';
     a.click();
     setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
     btn.textContent = '✓ Downloaded';
   } catch (err) {
-    btn.disabled = false;
+    btn.disabled    = false;
     btn.textContent = '⬇ Retry Download';
     showToast(`Download failed: ${err.message}`);
   }

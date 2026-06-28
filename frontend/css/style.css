@@ -753,6 +753,24 @@ header a:hover { border-color: var(--accent); color: var(--text); }
   color: var(--text-dim);
 }
 
+.yt-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.yt-divider::before,
+.yt-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
 .lib-badge {
   font-size: 0.78rem;
   padding: 4px 10px;
