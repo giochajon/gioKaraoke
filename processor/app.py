@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -153,12 +154,24 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Karaoke,Arial,62,&H0000FFFF,&H00FFFFFF,&H00150025,&H78000000,-1,0,0,0,100,100,0.8,0,1,3,1,2,30,30,75,1
+Style: Near,Arial,46,&H00E6E6E6,&H00FFFFFF,&H00150025,&H78000000,0,0,0,0,100,100,0.8,0,1,2,1,5,30,30,75,1
+Style: Far,Arial,34,&H00909090,&H00FFFFFF,&H00150025,&H78000000,0,0,0,0,100,100,0.8,0,1,2,1,5,30,30,75,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-# PrimaryColour &H0000FFFF = yellow (sung/highlighted)
-# SecondaryColour &H00FFFFFF = white (not yet sung)
+# PrimaryColour &H0000FFFF = yellow (sung/highlighted current line)
+# Near/Far styles render the dimmer lines just before/after the current one,
+# producing a scrolling lyrics effect baked directly into the video.
+
+# Fixed vertical slots for the 5-line scrolling window (PlayResY 720), centered horizontally.
+_SCROLL_ROWS = {
+    -2: (640, 190, "Far"),
+    -1: (640, 300, "Near"),
+    0:  (640, 430, "Karaoke"),
+    1:  (640, 560, "Near"),
+    2:  (640, 670, "Far"),
+}
 
 
 def _ts(seconds: float) -> str:
@@ -169,8 +182,39 @@ def _ts(seconds: float) -> str:
     return f"{h}:{m:02d}:{int(s):02d}.{round((s % 1) * 100):02d}"
 
 
+def _render_scrolling_ass(items: list[dict], tmpdir: str) -> str:
+    """
+    items: chronological [{t0, t1, active, plain}], where `active` is the
+    text (with \\kf karaoke-fill tags) shown while that line is current, and
+    `plain` is its plain-text form shown when it's a neighbour.
+
+    For every line's time window, emits the current line plus up to two
+    lines before/after at fixed screen positions (see _SCROLL_ROWS), so the
+    lyric stack visibly scrolls up through the video as playback advances.
+    """
+    n = len(items)
+    dialogue = []
+    for i, item in enumerate(items):
+        t0, t1 = _ts(item["t0"]), _ts(item["t1"])
+        for offset, (x, y, style) in _SCROLL_ROWS.items():
+            j = i + offset
+            if j < 0 or j >= n:
+                continue
+            text = items[j]["active"] if offset == 0 else items[j]["plain"]
+            dialogue.append(
+                f"Dialogue: 0,{t0},{t1},{style},,0,0,0,,{{\\an5\\pos({x},{y})}}{text}"
+            )
+
+    ass_path = os.path.join(tmpdir, "lyrics.ass")
+    with open(ass_path, "w", encoding="utf-8") as fh:
+        fh.write(_ASS_HEADER)
+        fh.write("\n".join(dialogue))
+        fh.write("\n")
+    return ass_path
+
+
 def generate_ass(result: dict, tmpdir: str) -> str:
-    lines = []
+    items: list[dict] = []
 
     for seg in result.get("segments", []):
         words = seg.get("words", [])
@@ -182,10 +226,7 @@ def generate_ass(result: dict, tmpdir: str) -> str:
             cs = max(1, round((t1 - t0) * 100))
             text = (seg.get("text") or "").strip()
             if text:
-                lines.append(
-                    f"Dialogue: 0,{_ts(t0)},{_ts(t1)},"
-                    f"Karaoke,,0,0,0,,{{\\kf{cs}}}{text}"
-                )
+                items.append({"t0": t0, "t1": t1, "active": f"{{\\kf{cs}}}{text}", "plain": text})
             continue
 
         # Break words into display lines of ≤8 words or ≤6 s
@@ -195,19 +236,19 @@ def generate_ass(result: dict, tmpdir: str) -> str:
         def flush(wds: list[dict]) -> None:
             if not wds:
                 return
-            s = _ts(wds[0].get("start", 0))
-            e = _ts(wds[-1].get("end", 0))
-            parts = []
+            t0 = wds[0].get("start", 0)
+            t1 = wds[-1].get("end", 0)
+            parts, plain_parts = [], []
             for w in wds:
                 cs = max(1, round((w.get("end", 0) - w.get("start", 0)) * 100))
                 tok = (w.get("word") or w.get("text", "")).strip()
                 if tok:
                     parts.append(f"{{\\kf{cs}}}{tok} ")
-            text = "".join(parts).rstrip()
-            if text:
-                lines.append(
-                    f"Dialogue: 0,{s},{e},Karaoke,,0,0,0,,{text}"
-                )
+                    plain_parts.append(tok)
+            active = "".join(parts).rstrip()
+            plain = " ".join(plain_parts)
+            if active:
+                items.append({"t0": t0, "t1": t1, "active": active, "plain": plain})
 
         for i, w in enumerate(words):
             if line_start is None:
@@ -219,13 +260,7 @@ def generate_ass(result: dict, tmpdir: str) -> str:
                 current = []
                 line_start = None
 
-    ass_path = os.path.join(tmpdir, "lyrics.ass")
-    with open(ass_path, "w", encoding="utf-8") as fh:
-        fh.write(_ASS_HEADER)
-        fh.write("\n".join(lines))
-        fh.write("\n")
-
-    return ass_path
+    return _render_scrolling_ass(items, tmpdir)
 
 
 # ── LRC / lrclib.net helpers ─────────────────────────────────────────────────
@@ -249,66 +284,141 @@ def parse_lrc(lrc_text: str) -> list[dict]:
     return lines
 
 
-def fetch_lrclib_lyrics(song_title: str) -> list[dict] | None:
+def _lrclib_search(params: dict, retries: int = 3) -> list[dict]:
     """
-    Search lrclib.net for synced lyrics.
-    Handles 'Artist - Title' filename format.
-    Returns [{time, text}] with at least 4 lines, or None.
+    Hits lrclib.net's search API, retrying transient timeouts. The process
+    runs this right after CPU-bound vocal separation finishes, when the
+    container can still be under enough load for a single network read to
+    stall — a one-shot timeout there shouldn't permanently mean "no lyrics".
     """
-    artist, track = "", song_title
-    if " - " in song_title:
-        parts = song_title.split(" - ", 1)
-        artist, track = parts[0].strip(), parts[1].strip()
-
-    params: dict = {"track_name": track}
-    if artist:
-        params["artist_name"] = artist
-
     url = "https://lrclib.net/api/search?" + urllib.parse.urlencode(params)
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "gioKaraoke/1.0 (open-source karaoke app)"}
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            results = json.loads(resp.read().decode("utf-8"))
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "gioKaraoke/1.0 (open-source karaoke app)"}
+    )
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                print(f"[lrclib] Search attempt {attempt + 1} failed ({exc}), retrying…", flush=True)
+                time.sleep(1.5 * (attempt + 1))
+    raise last_exc
 
+
+def _clean_words(text: str) -> str:
+    """Strip dashes/underscores/special chars, collapse whitespace, lowercase."""
+    text = re.sub(r"[-_]+", " ", text)
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def search_lrclib_debug(raw_title: str) -> dict:
+    """
+    Search lrclib.net for synced lyrics, given the MP3 filename (sans extension).
+
+    Tries an exact 'Artist - Title' split first, then falls back to a fuzzy
+    word-overlap search against the filename with dashes/underscores/special
+    characters removed, since most filenames aren't formatted consistently.
+
+    Returns a debug dict: {raw_title, cleaned_query, attempts: [...], lines}
+    where `lines` is [{time, text}] (≥4 lines) if a match was found, else None.
+    """
+    attempts_params: list[dict] = []
+
+    if " - " in raw_title:
+        artist, track = (p.strip() for p in raw_title.split(" - ", 1))
+        if artist and track:
+            attempts_params.append({"artist_name": artist, "track_name": track})
+
+    cleaned = _clean_words(raw_title)
+    if cleaned:
+        attempts_params.append({"q": cleaned})
+
+    cleaned_words = set(cleaned.split())
+    debug: dict = {"raw_title": raw_title, "cleaned_query": cleaned, "attempts": [], "lines": None}
+
+    for params in attempts_params:
+        attempt_log: dict = {"params": params, "error": None, "result_count": 0, "candidates": [], "matched": False}
+        debug["attempts"].append(attempt_log)
+
+        try:
+            results = _lrclib_search(params)
+        except Exception as exc:
+            attempt_log["error"] = str(exc)
+            print(f"[lrclib] Fetch failed for {params}: {exc}", flush=True)
+            continue
+
+        attempt_log["result_count"] = len(results)
+
+        best, best_score = None, 0.0
         for result in results:
             synced = (result.get("syncedLyrics") or "").strip()
-            if not synced:
-                continue
-            lines = parse_lrc(synced)
-            if len(lines) >= 4:
-                print(
-                    f"[lrclib] Found {len(lines)} synced lines for '{song_title}'",
-                    flush=True,
-                )
-                return lines
+            has_synced = bool(synced)
+            line_count = len(parse_lrc(synced)) if has_synced else 0
 
-        print(f"[lrclib] No synced lyrics found for '{song_title}'", flush=True)
-        return None
-    except Exception as exc:
-        print(f"[lrclib] Fetch failed: {exc}", flush=True)
-        return None
+            candidate = _clean_words(
+                f"{result.get('artistName', '')} {result.get('trackName', '')}"
+            )
+            candidate_words = set(candidate.split())
+            overlap = len(cleaned_words & candidate_words)
+            score = overlap / max(1, len(cleaned_words | candidate_words))
+
+            if len(attempt_log["candidates"]) < 5:
+                attempt_log["candidates"].append({
+                    "artistName": result.get("artistName", ""),
+                    "trackName": result.get("trackName", ""),
+                    "score": round(score, 2),
+                    "has_synced": has_synced,
+                    "line_count": line_count,
+                })
+
+            if not has_synced or line_count < 4:
+                continue
+
+            # Exact field search trusts lrclib's own ranking (first hit); the
+            # fuzzy fallback needs a real word-overlap match to avoid noise.
+            if "track_name" in params or score >= 0.4:
+                best, best_score = parse_lrc(synced), score
+                break
+            if score > best_score:
+                best, best_score = parse_lrc(synced), score
+
+        if best:
+            attempt_log["matched"] = True
+            debug["lines"] = best
+            print(
+                f"[lrclib] Found {len(best)} synced lines for '{raw_title}' "
+                f"via {list(params.keys())} (score={best_score:.2f})",
+                flush=True,
+            )
+            return debug
+
+    print(f"[lrclib] No synced lyrics found for '{raw_title}'", flush=True)
+    return debug
+
+
+def fetch_lrclib_lyrics(raw_title: str) -> list[dict] | None:
+    return search_lrclib_debug(raw_title)["lines"]
 
 
 def lrc_to_ass(lrc_lines: list[dict], tmpdir: str) -> str:
-    """Convert [{time, text}] LRC lines to ASS with line-level karaoke fill."""
-    dialogue = []
+    """Convert [{time, text}] LRC lines to a scrolling karaoke ASS file."""
+    items = []
     for i, line in enumerate(lrc_lines):
         t0 = line["time"]
         t1 = lrc_lines[i + 1]["time"] if i + 1 < len(lrc_lines) else t0 + 5.0
         t1 = min(t1, t0 + 8.0)
         duration_cs = max(1, round((t1 - t0) * 100))
-        dialogue.append(
-            f"Dialogue: 0,{_ts(t0)},{_ts(t1)},Karaoke,,0,0,0,,{{\\kf{duration_cs}}}{line['text']}"
-        )
+        items.append({
+            "t0": t0, "t1": t1,
+            "active": f"{{\\kf{duration_cs}}}{line['text']}",
+            "plain": line["text"],
+        })
 
-    ass_path = os.path.join(tmpdir, "lyrics.ass")
-    with open(ass_path, "w", encoding="utf-8") as fh:
-        fh.write(_ASS_HEADER)
-        fh.write("\n".join(dialogue))
-        fh.write("\n")
-    return ass_path
+    return _render_scrolling_ass(items, tmpdir)
 
 
 # ── Video rendering ──────────────────────────────────────────────────────────
@@ -347,7 +457,7 @@ def render_video(
 
 # ── Processing pipeline ───────────────────────────────────────────────────────
 
-async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) -> None:
+async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str, raw_title: str) -> None:
     loop = asyncio.get_event_loop()
 
     try:
@@ -411,17 +521,17 @@ async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) 
             # Fall back: pick the larger output file (usually instrumental)
             instrumental_path = max(resolved, key=lambda p: os.path.getsize(p))
 
-        # ── Step 2: Fetch lyrics from lrclib.net (15 s hard timeout) ────────
+        # ── Step 2: Fetch lyrics from lrclib.net (75 s hard timeout — covers retries) ──
         update_job(job_id, status="transcribing", progress=38,
                    step="Fetching lyrics from lrclib.net…")
 
         try:
             lrc_lines = await asyncio.wait_for(
-                loop.run_in_executor(None, fetch_lrclib_lyrics, song_title),
-                timeout=15.0,
+                loop.run_in_executor(None, fetch_lrclib_lyrics, raw_title),
+                timeout=75.0,
             )
         except asyncio.TimeoutError:
-            print(f"[lrclib] Timed out for '{song_title}'", flush=True)
+            print(f"[lrclib] Timed out for '{raw_title}'", flush=True)
             lrc_lines = None
 
         # ── Step 3: ASS subtitles ───────────────────────────────────────────
@@ -429,7 +539,6 @@ async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) 
             update_job(
                 job_id, status="subtitles", progress=55,
                 step=f"Found {len(lrc_lines)} lyric lines — building subtitles…",
-                lyrics_lines=lrc_lines, lyrics_ready=True,
             )
             ass_path = lrc_to_ass(lrc_lines, tmpdir)
         else:
@@ -453,15 +562,6 @@ async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) 
             update_job(job_id, status="subtitles", progress=65,
                        step="Generating karaoke subtitle file from Whisper…")
             ass_path = generate_ass(transcript, tmpdir)
-
-            # Extract per-segment lines for the frontend lyrics preview
-            whisper_lines = [
-                {"time": round(seg.get("start", 0), 3), "text": (seg.get("text") or "").strip()}
-                for seg in transcript.get("segments", [])
-                if (seg.get("text") or "").strip()
-            ]
-            if whisper_lines:
-                update_job(job_id, lyrics_lines=whisper_lines, lyrics_ready=True)
 
         # Validate that the ASS file has at least one Dialogue line
         with open(ass_path, encoding="utf-8") as _f:
@@ -499,6 +599,17 @@ async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) 
 
 # ── API ───────────────────────────────────────────────────────────────────────
 
+@app.post("/api/convert/lyrics-test")
+async def lyrics_test(file: UploadFile):
+    """Debug endpoint: runs the lrclib.net lookup for a filename and returns
+    the full search trail (attempts, candidates, scores) without running the
+    rest of the conversion pipeline."""
+    if not file.filename:
+        raise HTTPException(400, detail="No filename provided.")
+    raw_title = os.path.splitext(file.filename)[0]
+    return search_lrclib_debug(raw_title)
+
+
 @app.post("/api/convert/upload")
 async def upload(file: UploadFile, background_tasks: BackgroundTasks):
     if not file.filename or not file.filename.lower().endswith(".mp3"):
@@ -507,7 +618,8 @@ async def upload(file: UploadFile, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
     tmpdir = tempfile.mkdtemp(prefix="karaoke-")
     mp3_path = os.path.join(tmpdir, file.filename)
-    song_title = os.path.splitext(file.filename)[0].replace("_", " ").replace("-", " ").title()
+    raw_title = os.path.splitext(file.filename)[0]
+    song_title = raw_title.replace("_", " ").replace("-", " ").title()
 
     content = await file.read()
     with open(mp3_path, "wb") as fh:
@@ -524,7 +636,7 @@ async def upload(file: UploadFile, background_tasks: BackgroundTasks):
         "error": None,
     }
 
-    background_tasks.add_task(process_job, job_id, mp3_path, tmpdir, song_title)
+    background_tasks.add_task(process_job, job_id, mp3_path, tmpdir, song_title, raw_title)
     return {"job_id": job_id, "song_title": song_title}
 
 
@@ -541,7 +653,6 @@ async def status_stream(job_id: str):
                 "progress": job["progress"],
                 "step": job["step"],
                 "error": job.get("error"),
-                "lyrics_ready": job.get("lyrics_ready", False),
             }
             yield f"data: {json.dumps(payload)}\n\n"
             if job["status"] in ("done", "error"):
@@ -553,17 +664,6 @@ async def status_stream(job_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-@app.get("/api/convert/lyrics/{job_id}")
-async def get_lyrics(job_id: str):
-    job = jobs.get(job_id)
-    if job is None:
-        raise HTTPException(404, detail="Job not found.")
-    lyrics = job.get("lyrics_lines")
-    if not lyrics:
-        raise HTTPException(404, detail="Lyrics not yet available.")
-    return {"lyrics": lyrics, "song_title": job.get("song_title", "")}
 
 
 @app.get("/api/convert/download/{job_id}")
