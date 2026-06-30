@@ -64,6 +64,13 @@ function createCard(file) {
     </div>
     <div class="job-progress-bar"><div class="job-progress-fill"></div></div>
     <div class="job-status">Uploading…</div>
+    <div class="lyrics-panel" style="display:none;">
+      <div class="lyrics-header">
+        <span class="lyrics-title">🎵 Lyrics Preview</span>
+        <button class="lyrics-preview-btn">▶ Auto-scroll</button>
+      </div>
+      <div class="lyrics-window"></div>
+    </div>
     <div class="job-actions" style="display:none;">
       <button class="big-btn download-btn">⬇ Download MP4</button>
     </div>
@@ -104,8 +111,14 @@ async function startJob(file) {
   try {
     const res = await fetch('/api/convert/upload', { method: 'POST', body: form });
     if (!res.ok) {
-      const { detail } = await res.json().catch(() => ({}));
-      throw new Error(detail || `Upload failed (${res.status})`);
+      let msg = `Upload failed (${res.status})`;
+      try {
+        const body = await res.json();
+        if (typeof body.detail === 'string')       msg = body.detail;
+        else if (Array.isArray(body.detail))       msg = body.detail.map(e => e.msg || JSON.stringify(e)).join('; ');
+        else if (typeof body.error === 'string')   msg = body.error;
+      } catch (_) {}
+      throw new Error(msg);
     }
     ({ job_id: jobId, song_title: songTitle } = await res.json());
   } catch (err) {
@@ -121,7 +134,23 @@ async function startJob(file) {
   // SSE progress stream
   const es = new EventSource(`/api/convert/status/${jobId}`);
 
+  // Detect server restart: if SSE goes silent for >20 s the container likely crashed.
+  let sseLastSeen = Date.now();
+  const sseSilenceTimer = setInterval(() => {
+    if (card.classList.contains('job-done') || card.classList.contains('job-error')) {
+      clearInterval(sseSilenceTimer);
+      return;
+    }
+    if (Date.now() - sseLastSeen > 20_000) {
+      clearInterval(sseSilenceTimer);
+      es.close();
+      card.classList.add('job-error');
+      setStatus(card, '✗ Server stopped responding — it may have run out of memory. Please try again.');
+    }
+  }, 5000);
+
   es.onmessage = e => {
+    sseLastSeen = Date.now();
     const data = JSON.parse(e.data);
     const { status, progress, step, error } = data;
 
@@ -143,7 +172,13 @@ async function startJob(file) {
     document.querySelectorAll('.pipe-step').forEach(el => el.classList.remove('pipe-active'));
     if (pipeId) document.getElementById(pipeId)?.classList.add('pipe-active');
 
+    if (data.lyrics_ready && !card.dataset.lyricsLoaded) {
+      card.dataset.lyricsLoaded = '1';
+      fetchAndDisplayLyrics(jobId, card);
+    }
+
     if (status === 'done') {
+      clearInterval(sseSilenceTimer);
       es.close();
       activateStep(card, 'render');
       card.classList.add('job-done');
@@ -155,23 +190,25 @@ async function startJob(file) {
     }
 
     if (status === 'error') {
+      clearInterval(sseSilenceTimer);
       es.close();
       card.classList.add('job-error');
       setStatus(card, `✗ ${error || step}`);
     }
 
     if (status === 'not_found') {
+      clearInterval(sseSilenceTimer);
       es.close();
       card.classList.add('job-error');
-      setStatus(card, '✗ Job not found on server.');
+      setStatus(card, '✗ Server restarted — job was lost (possibly out of memory). Please try again.');
     }
   };
 
   es.onerror = () => {
-    // SSE closed — if job is not done, mark as network error
-    if (!card.classList.contains('job-done')) {
+    if (!card.classList.contains('job-done') && !card.classList.contains('job-error')) {
+      clearInterval(sseSilenceTimer);
       es.close();
-      setStatus(card, '✗ Connection lost. The server may still be processing.');
+      setStatus(card, '✗ Connection lost — server may have restarted. Please try again.');
       card.classList.add('job-error');
     }
   };
@@ -197,6 +234,67 @@ async function triggerDownload(jobId, songTitle, btn) {
     btn.textContent = '⬇ Retry Download';
     showToast(`Download failed: ${err.message}`);
   }
+}
+
+// ── Lyrics preview ────────────────────────────────────────────────────────────
+
+async function fetchAndDisplayLyrics(jobId, card) {
+  try {
+    const res = await fetch(`/api/convert/lyrics/${jobId}`);
+    if (!res.ok) return;
+    const { lyrics } = await res.json();
+    if (!lyrics || !lyrics.length) return;
+    card._lyrics = lyrics;
+    showLyricsAt(card, 0);
+    card.querySelector('.lyrics-panel').style.display = 'block';
+    card.querySelector('.lyrics-preview-btn')
+        .addEventListener('click', () => startLyricsPreview(card));
+  } catch (_) {}
+}
+
+function showLyricsAt(card, idx) {
+  const lyrics = card._lyrics;
+  if (!lyrics) return;
+  idx = Math.max(0, Math.min(idx, lyrics.length - 1));
+  card._lyricsIdx = idx;
+  const start = Math.max(0, idx - 1);
+  const visible = lyrics.slice(start, start + 4);
+  card.querySelector('.lyrics-window').innerHTML = visible.map((line, i) => {
+    const cur = (start + i === idx);
+    return `<div class="lyric-line${cur ? ' lyric-active' : ''}">${esc(line.text)}</div>`;
+  }).join('');
+}
+
+function startLyricsPreview(card) {
+  const lyrics = card._lyrics;
+  if (!lyrics) return;
+  const btn = card.querySelector('.lyrics-preview-btn');
+
+  if (card._previewTimer) {
+    clearInterval(card._previewTimer);
+    card._previewTimer = null;
+    btn.textContent = '▶ Auto-scroll';
+    return;
+  }
+
+  btn.textContent = '⏸ Stop';
+  const t0 = Date.now();
+
+  card._previewTimer = setInterval(() => {
+    const elapsed = (Date.now() - t0) / 1000;
+    let idx = 0;
+    for (let i = 0; i < lyrics.length; i++) {
+      if (lyrics[i].time != null && lyrics[i].time <= elapsed) idx = i;
+    }
+    showLyricsAt(card, idx);
+
+    const last = lyrics[lyrics.length - 1];
+    if (last.time != null && elapsed > last.time + 6) {
+      clearInterval(card._previewTimer);
+      card._previewTimer = null;
+      btn.textContent = '▶ Auto-scroll';
+    }
+  }, 200);
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

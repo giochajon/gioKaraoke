@@ -13,9 +13,12 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
+import urllib.request
 import uuid
 from typing import Optional
 
@@ -225,6 +228,89 @@ def generate_ass(result: dict, tmpdir: str) -> str:
     return ass_path
 
 
+# ── LRC / lrclib.net helpers ─────────────────────────────────────────────────
+
+_LRC_PATTERN = re.compile(r'\[(\d{1,3}):(\d{2})\.(\d{2,3})\](.*)')
+
+
+def parse_lrc(lrc_text: str) -> list[dict]:
+    """Return [{time: float, text: str}] from LRC-format text."""
+    lines = []
+    for raw in lrc_text.splitlines():
+        m = _LRC_PATTERN.match(raw.strip())
+        if not m:
+            continue
+        mins, secs, frac, text = m.groups()
+        frac_sec = int(frac) / (100 if len(frac) == 2 else 1000)
+        t = int(mins) * 60 + int(secs) + frac_sec
+        text = text.strip()
+        if text:
+            lines.append({"time": round(t, 3), "text": text})
+    return lines
+
+
+def fetch_lrclib_lyrics(song_title: str) -> list[dict] | None:
+    """
+    Search lrclib.net for synced lyrics.
+    Handles 'Artist - Title' filename format.
+    Returns [{time, text}] with at least 4 lines, or None.
+    """
+    artist, track = "", song_title
+    if " - " in song_title:
+        parts = song_title.split(" - ", 1)
+        artist, track = parts[0].strip(), parts[1].strip()
+
+    params: dict = {"track_name": track}
+    if artist:
+        params["artist_name"] = artist
+
+    url = "https://lrclib.net/api/search?" + urllib.parse.urlencode(params)
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "gioKaraoke/1.0 (open-source karaoke app)"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            results = json.loads(resp.read().decode("utf-8"))
+
+        for result in results:
+            synced = (result.get("syncedLyrics") or "").strip()
+            if not synced:
+                continue
+            lines = parse_lrc(synced)
+            if len(lines) >= 4:
+                print(
+                    f"[lrclib] Found {len(lines)} synced lines for '{song_title}'",
+                    flush=True,
+                )
+                return lines
+
+        print(f"[lrclib] No synced lyrics found for '{song_title}'", flush=True)
+        return None
+    except Exception as exc:
+        print(f"[lrclib] Fetch failed: {exc}", flush=True)
+        return None
+
+
+def lrc_to_ass(lrc_lines: list[dict], tmpdir: str) -> str:
+    """Convert [{time, text}] LRC lines to ASS with line-level karaoke fill."""
+    dialogue = []
+    for i, line in enumerate(lrc_lines):
+        t0 = line["time"]
+        t1 = lrc_lines[i + 1]["time"] if i + 1 < len(lrc_lines) else t0 + 5.0
+        t1 = min(t1, t0 + 8.0)
+        duration_cs = max(1, round((t1 - t0) * 100))
+        dialogue.append(
+            f"Dialogue: 0,{_ts(t0)},{_ts(t1)},Karaoke,,0,0,0,,{{\\kf{duration_cs}}}{line['text']}"
+        )
+
+    ass_path = os.path.join(tmpdir, "lyrics.ass")
+    with open(ass_path, "w", encoding="utf-8") as fh:
+        fh.write(_ASS_HEADER)
+        fh.write("\n".join(dialogue))
+        fh.write("\n")
+    return ass_path
+
+
 # ── Video rendering ──────────────────────────────────────────────────────────
 
 def render_video(
@@ -282,10 +368,16 @@ async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) 
 
         async def _heartbeat_separate() -> list[str]:
             elapsed = 0
+            MAX_SECS = 40 * 60  # 40-minute hard limit
             future = loop.run_in_executor(None, _separate)
             while not future.done():
                 await asyncio.sleep(10)
                 elapsed += 10
+                if elapsed >= MAX_SECS:
+                    raise TimeoutError(
+                        f"Vocal separation exceeded {MAX_SECS // 60} min — "
+                        "file may be too large for CPU-only processing."
+                    )
                 m, s = divmod(elapsed, 60)
                 update_job(
                     job_id,
@@ -299,7 +391,14 @@ async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) 
         resolved = [
             f if os.path.isabs(f) else os.path.join(tmpdir, f)
             for f in outputs
+            if os.path.exists(f if os.path.isabs(f) else os.path.join(tmpdir, f))
         ]
+
+        if not resolved:
+            raise RuntimeError(
+                "Vocal separation produced no output files — "
+                "the audio may be corrupt or the process was killed (check available RAM)."
+            )
 
         # Find the instrumental file (avoids vocals)
         instrumental_path: Optional[str] = None
@@ -312,27 +411,64 @@ async def process_job(job_id: str, mp3_path: str, tmpdir: str, song_title: str) 
             # Fall back: pick the larger output file (usually instrumental)
             instrumental_path = max(resolved, key=lambda p: os.path.getsize(p))
 
-        # ── Step 2: Transcription ───────────────────────────────────────────
-        update_job(job_id, status="transcribing", progress=40,
-                   step="Transcribing lyrics with Whisper…")
+        # ── Step 2: Fetch lyrics from lrclib.net (15 s hard timeout) ────────
+        update_job(job_id, status="transcribing", progress=38,
+                   step="Fetching lyrics from lrclib.net…")
 
-        def _transcribe() -> dict:
-            import whisper_timestamped as whisper
-            audio = whisper.load_audio(mp3_path)
-            model = whisper.load_model("base", download_root=WHISPER_CACHE)
-            return whisper.transcribe(
-                model, audio,
-                language=None,
-                detect_disfluencies=False,
-                verbose=False,
+        try:
+            lrc_lines = await asyncio.wait_for(
+                loop.run_in_executor(None, fetch_lrclib_lyrics, song_title),
+                timeout=15.0,
             )
-
-        transcript = await loop.run_in_executor(None, _transcribe)
+        except asyncio.TimeoutError:
+            print(f"[lrclib] Timed out for '{song_title}'", flush=True)
+            lrc_lines = None
 
         # ── Step 3: ASS subtitles ───────────────────────────────────────────
-        update_job(job_id, status="subtitles", progress=65,
-                   step="Generating karaoke subtitle file…")
-        ass_path = generate_ass(transcript, tmpdir)
+        if lrc_lines and len(lrc_lines) >= 4:
+            update_job(
+                job_id, status="subtitles", progress=55,
+                step=f"Found {len(lrc_lines)} lyric lines — building subtitles…",
+                lyrics_lines=lrc_lines, lyrics_ready=True,
+            )
+            ass_path = lrc_to_ass(lrc_lines, tmpdir)
+        else:
+            # Fall back to Whisper transcription
+            update_job(job_id, status="transcribing", progress=42,
+                       step="No online lyrics found — transcribing with Whisper…")
+
+            def _transcribe() -> dict:
+                import whisper_timestamped as whisper
+                audio = whisper.load_audio(mp3_path)
+                model = whisper.load_model("base", download_root=WHISPER_CACHE)
+                return whisper.transcribe(
+                    model, audio,
+                    language=None,
+                    detect_disfluencies=False,
+                    verbose=False,
+                )
+
+            transcript = await loop.run_in_executor(None, _transcribe)
+
+            update_job(job_id, status="subtitles", progress=65,
+                       step="Generating karaoke subtitle file from Whisper…")
+            ass_path = generate_ass(transcript, tmpdir)
+
+            # Extract per-segment lines for the frontend lyrics preview
+            whisper_lines = [
+                {"time": round(seg.get("start", 0), 3), "text": (seg.get("text") or "").strip()}
+                for seg in transcript.get("segments", [])
+                if (seg.get("text") or "").strip()
+            ]
+            if whisper_lines:
+                update_job(job_id, lyrics_lines=whisper_lines, lyrics_ready=True)
+
+        # Validate that the ASS file has at least one Dialogue line
+        with open(ass_path, encoding="utf-8") as _f:
+            _ass_content = _f.read()
+        if "Dialogue:" not in _ass_content:
+            print(f"[karaoke] WARNING: ASS file has no Dialogue lines — video will have no lyrics", flush=True)
+            update_job(job_id, step="⚠ Could not generate lyrics — video will have no subtitles")
 
         # ── Step 4: Background ──────────────────────────────────────────────
         update_job(job_id, status="background", progress=72,
@@ -405,6 +541,7 @@ async def status_stream(job_id: str):
                 "progress": job["progress"],
                 "step": job["step"],
                 "error": job.get("error"),
+                "lyrics_ready": job.get("lyrics_ready", False),
             }
             yield f"data: {json.dumps(payload)}\n\n"
             if job["status"] in ("done", "error"):
@@ -416,6 +553,17 @@ async def status_stream(job_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/convert/lyrics/{job_id}")
+async def get_lyrics(job_id: str):
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="Job not found.")
+    lyrics = job.get("lyrics_lines")
+    if not lyrics:
+        raise HTTPException(404, detail="Lyrics not yet available.")
+    return {"lyrics": lyrics, "song_title": job.get("song_title", "")}
 
 
 @app.get("/api/convert/download/{job_id}")
