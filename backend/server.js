@@ -262,11 +262,13 @@ function proxyToProcessor(prefix) {
   return (req, res) => {
     const target = new URL(PROCESSOR_URL);
 
-    // If express.json() already parsed the body, re-serialise it into a Buffer
-    // so we can set an explicit Content-Length and call proxyReq.end().
-    // Without this, piping an already-consumed stream never calls end() on the
-    // upstream request and FastAPI waits forever.
-    const preBody = req.body !== undefined
+    // If express.json() already consumed this JSON body, re-serialise it into a
+    // Buffer so we can set an explicit Content-Length and call proxyReq.end().
+    // Only do this for application/json — multipart uploads must be piped as-is;
+    // using req.body for them replaces the file data with "{}" and sends the wrong
+    // Content-Type, causing FastAPI to return a 422 validation error.
+    const isJson = req.is('application/json');
+    const preBody = (isJson && req.body !== undefined)
       ? Buffer.from(JSON.stringify(req.body))
       : null;
 

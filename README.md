@@ -110,6 +110,29 @@ Processing runs in the `giokaraoke-processor` container. Files are never stored 
 
 ---
 
+## Karaoke Creator
+
+Open **http://localhost:8094/convert.html** to turn any MP3 into a karaoke MP4 with synced, highlighted lyrics — entirely on your own infrastructure.
+
+### Pipeline
+
+1. **Vocal separation** — `audio-separator` (`UVR_MDXNET_KARA_2.onnx`, CPU-only ONNX inference) splits the track into instrumental and vocal stems
+2. **Lyrics acquisition** — fetches synced lyrics from [lrclib.net](https://lrclib.net) (free, unauthenticated) using the "Artist - Title" filename convention; falls back to Whisper transcription (`whisper-timestamped`, model `base`) if lrclib.net has no match or returns fewer than 4 lines
+3. **Subtitle generation** — converts the lyrics (LRC timestamps or Whisper segments) into an ASS karaoke subtitle file with a `\kf` fill effect; the generated file is validated to contain at least one `Dialogue:` line before rendering, so a failed fetch surfaces a warning instead of silently shipping a video with no lyrics
+4. **Background generation** — PIL-rendered background image
+5. **Render** — FFmpeg burns the subtitles and audio into the final MP4
+
+### Lyrics preview
+
+While a job is processing, a **🎵 Lyrics Preview** panel shows up to 4 lines at a time with the current line highlighted in the middle. Click **▶ Auto-scroll** to play through the lyrics on their original timestamps (lrclib.net jobs only).
+
+### Reliability
+
+- The vocal-separation step is CPU-bound and can take 10–20+ minutes on larger files; it now has a 40-minute hard timeout so a stuck job fails with a clear error instead of running forever
+- If the processor container restarts mid-job (e.g. an out-of-memory kill during separation), the browser detects 20 seconds of SSE silence and shows "Server stopped responding" instead of leaving the progress bar frozen indefinitely
+
+---
+
 ## Configuration
 
 All settings are controlled via environment variables (`.env` file or shell environment).
@@ -164,11 +187,13 @@ gioKaraoke/
 └── frontend/
     ├── index.html             # Karaoke player
     ├── youtube.html           # YouTube to MP3 converter
+    ├── convert.html           # MP3 to karaoke MP4 creator
     ├── admin.html             # Library management & indexing
     ├── css/style.css
     └── js/
         ├── app.js             # Queue, player, search logic
         ├── youtube.js         # YouTube converter UI + SSE job tracking
+        ├── convert.js         # Karaoke creator UI + lyrics preview + SSE job tracking
         └── cdg-renderer.js    # CD+G canvas renderer
 ```
 
