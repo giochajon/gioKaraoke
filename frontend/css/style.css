@@ -649,58 +649,6 @@ header a:hover { border-color: var(--accent); color: var(--text); }
 .job-actions { margin-top: 6px; }
 .download-btn { font-size: 0.85rem; padding: 9px 20px; }
 
-/* Lyrics preview panel */
-.lyrics-panel {
-  margin: 10px 0 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-.lyrics-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  background: var(--panel2);
-  border-bottom: 1px solid var(--border);
-}
-.lyrics-title {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--accent2);
-}
-.lyrics-preview-btn {
-  font-size: 0.7rem;
-  padding: 3px 10px;
-  background: var(--playing);
-  border: 1px solid var(--accent);
-  color: var(--text);
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-.lyrics-preview-btn:hover { background: var(--accent); }
-.lyrics-window {
-  padding: 10px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-height: 88px;
-}
-.lyric-line {
-  font-size: 0.85rem;
-  color: var(--text-dim);
-  padding: 3px 0;
-  transition: color 0.3s, transform 0.3s;
-  line-height: 1.4;
-}
-.lyric-line.lyric-active {
-  color: var(--text);
-  font-weight: 600;
-  font-size: 0.95rem;
-  color: var(--accent2);
-  transform: translateX(4px);
-}
 
 /* Info list */
 .info-list {

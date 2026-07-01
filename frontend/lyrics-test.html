@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gioKaraoke — Lyrics Lookup Tester</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body style="overflow: auto;">
+<div class="app" style="display:block; height:auto; min-height:100vh;">
+  <header>
+    <h1>🎤 gioKaraoke</h1>
+    <nav class="header-nav">
+      <a href="/">◀ Back to Player</a>
+      <a href="/convert.html">🎬 Karaoke Creator</a>
+      <a href="/admin.html">⚙ Library</a>
+    </nav>
+  </header>
+
+  <div class="conv-wrap">
+    <h2>🔍 Lyrics Lookup Tester</h2>
+    <p>Drop an MP3 to see exactly what lrclib.net was queried with, what it returned, and why a match did or didn't happen — without running vocal separation or rendering.</p>
+
+    <!-- Drop zone -->
+    <div class="drop-zone" id="drop-zone">
+      <div class="drop-inner">
+        <div class="drop-icon">🎵</div>
+        <p class="drop-text">Drag &amp; drop an MP3 here</p>
+        <p class="drop-sub">or</p>
+        <label class="big-btn" for="file-input">Choose File</label>
+        <input type="file" id="file-input" accept=".mp3" multiple hidden>
+      </div>
+    </div>
+
+    <!-- Results -->
+    <div id="result-list"></div>
+  </div>
+</div>
+
+<script src="/js/lyrics-test.js"></script>
+</body>
+</html>
