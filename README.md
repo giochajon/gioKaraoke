@@ -112,24 +112,47 @@ Processing runs in the `giokaraoke-processor` container. Files are never stored 
 
 ## Karaoke Creator
 
-Open **http://localhost:8094/convert.html** to turn any MP3 into a karaoke MP4 with synced, highlighted lyrics — entirely on your own infrastructure.
+Open **http://localhost:8094/convert.html** to turn any MP3 into a karaoke MP4 with synced, scrolling, highlighted lyrics — entirely on your own infrastructure.
 
 ### Pipeline
 
 1. **Vocal separation** — `audio-separator` (`UVR_MDXNET_KARA_2.onnx`, CPU-only ONNX inference) splits the track into instrumental and vocal stems
-2. **Lyrics acquisition** — fetches synced lyrics from [lrclib.net](https://lrclib.net) (free, unauthenticated) using the "Artist - Title" filename convention; falls back to Whisper transcription (`whisper-timestamped`, model `base`) if lrclib.net has no match or returns fewer than 4 lines
-3. **Subtitle generation** — converts the lyrics (LRC timestamps or Whisper segments) into an ASS karaoke subtitle file with a `\kf` fill effect; the generated file is validated to contain at least one `Dialogue:` line before rendering, so a failed fetch surfaces a warning instead of silently shipping a video with no lyrics
-4. **Background generation** — PIL-rendered background image
-5. **Render** — FFmpeg burns the subtitles and audio into the final MP4
+2. **Lyrics acquisition** — fetches synced lyrics from [lrclib.net](https://lrclib.net) (free, unauthenticated); falls back to Whisper transcription (`whisper-timestamped`, model `base`) if no match is found
+3. **Sync correction** — cross-correlates the isolated vocals stem against the lrclib timestamps to anchor lyrics to when singing actually starts in *this specific recording*, not the reference track lrclib was synced to (intro-length mismatches of several seconds are common between different releases)
+4. **Subtitle generation** — converts the time-corrected lyrics into an ASS subtitle file with a 5-line scrolling window and karaoke fill effect, baked directly into the video
+5. **Background generation** — PIL-rendered background image
+6. **Render** — FFmpeg burns the scrolling subtitles, silence padding (if needed for the countdown), and instrumental audio into the final MP4
 
-### Lyrics preview
+### Scrolling lyrics in the video
 
-While a job is processing, a **🎵 Lyrics Preview** panel shows up to 4 lines at a time with the current line highlighted in the middle. Click **▶ Auto-scroll** to play through the lyrics on their original timestamps (lrclib.net jobs only).
+The rendered MP4 always shows a **5-line scrolling window** centred on the current line:
+
+| Row | Style | Purpose |
+|-----|-------|---------|
+| Far above | small, dim grey | line sung 2 ago |
+| Near above | medium, light grey | line sung previously |
+| **Centre** | **large, yellow `\kf` fill** | **current line (karaoke highlight)** |
+| Near below | medium, light grey | next upcoming line |
+| Far below | small, dim grey | line after next |
+
+As each line becomes active the stack shifts up, giving a natural scrolling feel. Consecutive lines' display windows always abut so the screen never goes blank during instrumental breaks.
+
+### Countdown
+
+Every video begins with a **5 → 4 → 3 → 2 → 1** countdown (one digit per second) ending exactly when the first lyric starts. If the first lyric begins within the first 5 seconds of the song, the audio is automatically padded with silence so there is always a full 5-second lead-in — no digits are ever truncated.
+
+### Lyrics matching
+
+lrclib.net is queried using both a structured `artist_name` / `track_name` split (when the filename contains ` - `) and a fuzzy `q=` search with all special characters and dashes stripped, ranked by Jaccard word-overlap against the filename. If the lrclib.net call fails transiently (e.g. the container is still under load after CPU-heavy vocal separation), it is retried up to 3 times with backoff before falling back to Whisper.
 
 ### Reliability
 
-- The vocal-separation step is CPU-bound and can take 10–20+ minutes on larger files; it now has a 40-minute hard timeout so a stuck job fails with a clear error instead of running forever
-- If the processor container restarts mid-job (e.g. an out-of-memory kill during separation), the browser detects 20 seconds of SSE silence and shows "Server stopped responding" instead of leaving the progress bar frozen indefinitely
+- Vocal separation has a 40-minute hard timeout; a stuck job fails with a clear error instead of running forever
+- If the processor container restarts mid-job the browser detects 20 seconds of SSE silence and surfaces a "Server stopped responding" error instead of a frozen progress bar
+
+### Lyrics Lookup Tester
+
+Open **http://localhost:8094/lyrics-test.html** (linked from the Karaoke Creator nav) to test lrclib.net matching for any MP3 without running the full conversion pipeline. Drop a file and see exactly which search strategies were tried, every candidate returned with its match score, and a preview of the matched lines — useful for diagnosing filenames that produce a "no lyrics found" result.
 
 ---
 
@@ -193,7 +216,8 @@ gioKaraoke/
     └── js/
         ├── app.js             # Queue, player, search logic
         ├── youtube.js         # YouTube converter UI + SSE job tracking
-        ├── convert.js         # Karaoke creator UI + lyrics preview + SSE job tracking
+        ├── convert.js         # Karaoke creator UI + SSE job tracking
+        ├── lyrics-test.js     # Lyrics lookup tester UI
         └── cdg-renderer.js    # CD+G canvas renderer
 ```
 
