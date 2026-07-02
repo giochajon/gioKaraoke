@@ -58,7 +58,7 @@ async function submitURL() {
 
     if (!res.ok) {
       const { detail } = await res.json().catch(() => ({}));
-      throw new Error(detail || `Server error (${res.status})`);
+      throw new Error(formatErrorDetail(detail, `Server error (${res.status})`));
     }
 
     const { jobs, is_playlist, playlist_title } = await res.json();
@@ -141,16 +141,46 @@ function allStepsDone(card) {
   });
 }
 
-// ── SSE watcher (with auto-reconnect) ────────────────────────────────────────
+// ── SSE watcher (with auto-reconnect + stall detection) ───────────────────────
+// The processor's status stream emits a heartbeat every ~1.5s for as long as a
+// job is active, even when nothing's changed — so silence past STALL_TIMEOUT
+// reliably means the connection died or the processor container restarted
+// mid-job (e.g. the host went to sleep), not that a step is just taking a
+// while.
 function watchJob(jobId, card) {
   let retries = 0;
   const MAX_RETRIES = 6;
+  const STALL_TIMEOUT = 20000;
+  let watchdog = null;
+
+  function armWatchdog(es) {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      es.close();
+      handleDisconnect();
+    }, STALL_TIMEOUT);
+  }
+
+  function handleDisconnect() {
+    if (card.classList.contains('job-done') || card.classList.contains('job-error')) return;
+    retries++;
+    if (retries <= MAX_RETRIES) {
+      const delay = Math.min(2000 * retries, 12000);
+      setStatus(card, `⏳ Reconnecting… (${retries}/${MAX_RETRIES})`);
+      setTimeout(connect, delay);
+    } else {
+      card.classList.add('job-error');
+      setStatus(card, '✗ Lost connection after several retries. Refresh the page to check status.');
+    }
+  }
 
   function connect() {
     const es = new EventSource(`/api/youtube/status/${jobId}`);
+    armWatchdog(es);
 
     es.onmessage = e => {
       retries = 0;
+      armWatchdog(es);
 
       let data;
       try { data = JSON.parse(e.data); }
@@ -170,6 +200,7 @@ function watchJob(jobId, card) {
       if (pipeId) document.getElementById(pipeId)?.classList.add('pipe-active');
 
       if (status === 'done') {
+        clearTimeout(watchdog);
         es.close();
         allStepsDone(card);
         card.classList.add('job-done');
@@ -183,30 +214,24 @@ function watchJob(jobId, card) {
       }
 
       if (status === 'error') {
+        clearTimeout(watchdog);
         es.close();
         card.classList.add('job-error');
         setStatus(card, `✗ ${error || step}`);
       }
 
       if (status === 'not_found') {
+        clearTimeout(watchdog);
         es.close();
         card.classList.add('job-error');
-        setStatus(card, '✗ Job not found on server.');
+        setStatus(card, '✗ Job not found on server — the processor may have restarted mid-job. Please retry.');
       }
     };
 
     es.onerror = () => {
+      clearTimeout(watchdog);
       es.close();
-      if (card.classList.contains('job-done') || card.classList.contains('job-error')) return;
-      retries++;
-      if (retries <= MAX_RETRIES) {
-        const delay = Math.min(2000 * retries, 12000);
-        setStatus(card, `⏳ Reconnecting… (${retries}/${MAX_RETRIES})`);
-        setTimeout(connect, delay);
-      } else {
-        card.classList.add('job-error');
-        setStatus(card, '✗ Lost connection after several retries. Refresh the page to check status.');
-      }
+      handleDisconnect();
     };
   }
 
@@ -257,6 +282,19 @@ function esc(str) {
   return String(str).replace(/[&<>"']/g, c =>
     ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c])
   );
+}
+
+// FastAPI validation errors return `detail` as an array of {loc, msg, type}
+// objects (not a string) — stringifying that directly via `new Error(detail)`
+// produces "[object Object]". Flatten it into something readable instead.
+function formatErrorDetail(detail, fallback) {
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail.map(d => (d && d.msg) ? d.msg : JSON.stringify(d)).join('; ');
+  }
+  if (typeof detail === 'object') return detail.msg || JSON.stringify(detail);
+  return String(detail);
 }
 
 let toastTimer;

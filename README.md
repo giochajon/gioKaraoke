@@ -1,6 +1,6 @@
 # gioKaraoke
 
-Containerised karaoke player — search a library of MP3+CDG, MP4, and ZIP files, queue songs, and display synchronized lyrics in the browser. Includes a built-in YouTube to MP3 converter with optional AI audio enhancement.
+Containerised karaoke player — search a library of MP3+CDG, MP4, and ZIP files, queue songs, and display synchronized lyrics in the browser. Also includes a separate Music Library player (MP3/FLAC, lyrics, album art), a built-in YouTube to MP3 converter with optional AI audio enhancement, and optional HTTP Basic Auth to lock down access to the whole app.
 
 ---
 
@@ -26,14 +26,17 @@ cd gioKaraoke
 cp .env.example .env
 ```
 
-Edit `.env` and set `SONGS_PATH` to the absolute path of your karaoke files on the host:
+Edit `.env` and set `SONGS_PATH` / `MUSIC_PATH` to the absolute paths of your karaoke and music files on the host, and set `AUTH_USERNAME` / `AUTH_PASSWORD` to protect the app with a login:
 
 ```env
 SONGS_PATH=/home/user/karaoke
+MUSIC_PATH=/home/user/music
 MEILI_MASTER_KEY=karaoke-secret-key
+AUTH_USERNAME=admin
+AUTH_PASSWORD=change-me
 ```
 
-If `SONGS_PATH` is not set, the stack defaults to the empty `./songs/` directory in the repo root.
+If `SONGS_PATH` / `MUSIC_PATH` are not set, the stack defaults to the empty `./songs/` and `./music/` directories in the repo root. If `AUTH_USERNAME` / `AUTH_PASSWORD` are left blank, the app is unprotected (HTTP Basic Auth is skipped entirely).
 
 ### 3. Start the containers
 
@@ -48,15 +51,15 @@ This starts three containers:
 
 The app waits for Meilisearch to pass its health check before starting.
 
-### 4. Index your song library
+### 4. Index your libraries
 
-Open **http://localhost:8094/admin.html** and click **⚡ Index Songs**.
+Open **http://localhost:8094/admin.html** and click **⚡ Index Songs** for the karaoke library. For the music library, open **http://localhost:8094/music.html** and click **⚡ Index Music** at the top of the left panel.
 
-The indexer scans the mounted `/songs` directory, finds all supported files, and populates the search index. Re-indexing is safe and idempotent.
+Both indexers scan their respective mounted directories (`/songs`, `/music`), find all supported files, and populate their own Meilisearch index (`songs` and `music`, in the same Meilisearch instance). Re-indexing is safe and idempotent.
 
-### 5. Start singing
+### 5. Start singing (or listening)
 
-Open **http://localhost:8094**, search for a song, and add it to the queue.
+Open **http://localhost:8094** — if a login is configured, enter the `AUTH_USERNAME` / `AUTH_PASSWORD` credentials — then choose **Karaoke** or **Music Library**, search, and add tracks to the queue.
 
 ---
 
@@ -84,6 +87,22 @@ MP3+CDG pairs are matched by sharing the same base filename in the same director
 
 ---
 
+## Music Library
+
+Open **http://localhost:8094/music.html** to search and queue your MP3 / FLAC music collection, separate from the karaoke song library.
+
+### Features
+
+- **Search & queue** — same Meilisearch-powered instant search and queue UX as the karaoke player
+- **MP3 + FLAC playback** — lossless FLAC files stream and play natively in the browser
+- **Lyrics** — full lyric sheet pulled from the free lyrics.ovh API based on the track's artist/title, shown in the main display area (not synced to playback — internet lyrics have no timestamps)
+- **Album art** — fetched from the free iTunes Search API based on the track's artist/title and shown in the corner of the display area
+- **Self-service indexing** — a compact "⚡ Index Music" bar at the top of the page rebuilds the `music` search index without needing the admin page
+
+Both lyrics and album art lookups are cached in memory by the backend so repeat plays don't re-query the internet.
+
+---
+
 ## YouTube to MP3 Converter
 
 Open **http://localhost:8094/youtube.html** to convert any YouTube video or playlist to MP3 entirely on your own infrastructure — no third-party services involved.
@@ -107,6 +126,10 @@ Open **http://localhost:8094/youtube.html** to convert any YouTube video or play
 | **FFmpeg loudnorm** | EBU R128 broadcast loudness normalization for consistent playback volume (optional) |
 
 Processing runs in the `giokaraoke-processor` container. Files are never stored inside the container — they are streamed directly to the browser or saved to the host library volume.
+
+### Reliability
+
+Both the Karaoke Creator and YouTube converter track job progress over Server-Sent Events. The processor emits a heartbeat every ~1.5s for the life of a job, so the frontend can tell the difference between "still working" and "connection died" — if no heartbeat arrives for 20 seconds (e.g. the processor container restarted mid-job, or the host went to sleep), the UI automatically reconnects with backoff (up to 6 attempts) instead of hanging silently.
 
 ---
 
@@ -163,7 +186,10 @@ All settings are controlled via environment variables (`.env` file or shell envi
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SONGS_PATH` | `./songs` | Host path to your karaoke files directory |
+| `MUSIC_PATH` | `./music` | Host path to your MP3 / FLAC music directory |
 | `MEILI_MASTER_KEY` | `karaoke-secret-key` | Meilisearch master key — change this in any non-local deployment |
+| `AUTH_USERNAME` | *(blank)* | HTTP Basic Auth username — leave blank to disable login |
+| `AUTH_PASSWORD` | *(blank)* | HTTP Basic Auth password — leave blank to disable login |
 
 ---
 
@@ -199,25 +225,27 @@ gioKaraoke/
 ├── docker-compose.yml
 ├── .env.example
 ├── songs/                     # Default empty mount point (git-ignored)
+├── music/                     # Default empty mount point (git-ignored)
 ├── backend/
 │   ├── Dockerfile             # Node 20-alpine image
 │   ├── package.json
-│   └── server.js              # Express API + static file serving + processor proxy
+│   └── server.js              # Express API + basic auth + static file serving + processor proxy
 ├── processor/
 │   ├── Dockerfile             # Python 3.11-slim + FFmpeg + yt-dlp + Node.js
 │   ├── requirements.txt
 │   └── app.py                 # FastAPI: YouTube download + audio transcoding/enhancement
 └── frontend/
-    ├── index.html             # Karaoke player
+    ├── index.html             # Landing page (Karaoke / Music Library)
+    ├── karaoke.html           # Karaoke player
+    ├── music.html             # Music library player (lyrics + album art)
     ├── youtube.html           # YouTube to MP3 converter
     ├── convert.html           # MP3 to karaoke MP4 creator
     ├── admin.html             # Library management & indexing
     ├── css/style.css
     └── js/
-        ├── app.js             # Queue, player, search logic
-        ├── youtube.js         # YouTube converter UI + SSE job tracking
-        ├── convert.js         # Karaoke creator UI + SSE job tracking
-        ├── lyrics-test.js     # Lyrics lookup tester UI
+        ├── app.js             # Karaoke queue, player, search logic
+        ├── music.js           # Music queue, player, lyrics, album art
+        ├── youtube.js         # YouTube converter UI + SSE job tracking + reconnect
         └── cdg-renderer.js    # CD+G canvas renderer
 ```
 

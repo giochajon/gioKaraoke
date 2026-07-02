@@ -25,12 +25,16 @@ services:
       - "8094:3000"
     volumes:
       - ${SONGS_PATH:-./songs}:/songs:ro
+      - ${MUSIC_PATH:-./music}:/music:ro
     environment:
       - MEILISEARCH_URL=http://meilisearch:7700
       - MEILISEARCH_KEY=${MEILI_MASTER_KEY:-karaoke-secret-key}
       - SONGS_PATH=/songs
+      - MUSIC_PATH=/music
       - PORT=3000
       - PROCESSOR_URL=http://processor:5000
+      - AUTH_USERNAME=${AUTH_USERNAME:-}
+      - AUTH_PASSWORD=${AUTH_PASSWORD:-}
     depends_on:
       meilisearch:
         condition: service_healthy
@@ -44,11 +48,14 @@ services:
     environment:
       - MODEL_CACHE=/model_cache
       - SONGS_PATH=/songs
+      - MUSIC_PATH=/music
     volumes:
       # Persist AI model downloads across container restarts (~500 MB)
       - model_cache:/model_cache
       # Songs library — writable so YouTube→MP3 can save directly to host
       - ${SONGS_PATH:-./songs}:/songs
+      # Music library — read-only, only needed for lyric transcription
+      - ${MUSIC_PATH:-./music}:/music:ro
       # Temp working dir: OS-managed, no persistent user data
     restart: unless-stopped
     healthcheck:

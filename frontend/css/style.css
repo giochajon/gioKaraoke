@@ -73,6 +73,36 @@ header a:hover { border-color: var(--accent); color: var(--text); }
   overflow: hidden;
 }
 
+/* Music index bar */
+.music-index-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+.music-index-count {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.music-index-btn {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  flex-shrink: 0;
+}
+.music-index-btn:hover { border-color: var(--accent); background: var(--playing); }
+.music-index-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* Search */
 .search-section {
   padding: 12px;
@@ -269,6 +299,44 @@ header a:hover { border-color: var(--accent); color: var(--text); }
 .display-idle .idle-icon { font-size: 4rem; margin-bottom: 12px; opacity: 0.3; }
 .display-idle p { font-size: 0.9rem; opacity: 0.5; }
 
+/* ─── Music page: lyrics + album art ───────────────────────────────── */
+.lyrics-display {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  padding: 40px 60px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+.lyrics-display.hidden { display: none; }
+
+.lyrics-status {
+  margin: auto;
+  color: var(--text-dim);
+  font-size: 1rem;
+}
+
+.lyrics-line {
+  font-size: 1.15rem;
+  line-height: 1.8;
+  color: var(--text);
+}
+
+.album-art-corner {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  width: 140px;
+  height: 140px;
+  object-fit: cover;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.album-art-corner.hidden { display: none; }
+
 /* Controls */
 .controls {
   padding: 10px 16px;
@@ -461,6 +529,46 @@ header a:hover { border-color: var(--accent); color: var(--text); }
   color: #a0d0ff;
   overflow-x: auto;
   white-space: pre;
+}
+
+/* ─── Landing page ──────────────────────────────────────────────────── */
+.landing-wrap {
+  max-width: 720px;
+  margin: 60px auto;
+  padding: 0 20px;
+  text-align: center;
+}
+.landing-sub {
+  color: var(--text-dim);
+  margin-bottom: 36px;
+  font-size: 0.95rem;
+}
+.landing-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.landing-card {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 36px 20px;
+  text-decoration: none;
+  color: var(--text);
+  transition: border-color 0.2s, transform 0.15s, background 0.2s;
+}
+.landing-card:hover {
+  border-color: var(--accent);
+  background: var(--playing);
+  transform: translateY(-2px);
+}
+.landing-icon { font-size: 3rem; margin-bottom: 12px; }
+.landing-title { font-size: 1.15rem; font-weight: 700; margin-bottom: 8px; }
+.landing-desc { font-size: 0.85rem; color: var(--text-dim); line-height: 1.5; }
+
+@media (max-width: 560px) {
+  .landing-choices { grid-template-columns: 1fr; }
 }
 
 /* ─── Header nav (multiple links) ─────────────────────────────────────── */

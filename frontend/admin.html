@@ -10,7 +10,11 @@
 <div class="app" style="display:block; height:auto;">
   <header>
     <h1>🎤 gioKaraoke</h1>
-    <a href="/">◀ Back to Player</a>
+    <nav class="header-nav">
+      <a href="/">◀ Home</a>
+      <a href="/karaoke.html">🎤 Karaoke</a>
+      <a href="/music.html">🎧 Music</a>
+    </nav>
   </header>
 
   <div class="admin-wrap">
@@ -62,6 +66,11 @@ docker compose up -d</div>
   -o -name "*.cdg" -o -name "*.zip" \) -print0 \
   | xargs -0 realpath > filelist.txt</div>
     </div>
+
+    <p style="margin-top:24px; font-size:0.85rem;">
+      Looking to index your MP3 / FLAC music collection? That's now done directly from the
+      <a href="/music.html" style="color:#a0d0ff;">Music Library</a> page.
+    </p>
   </div>
 </div>
 
