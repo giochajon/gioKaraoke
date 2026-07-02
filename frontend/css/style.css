@@ -757,6 +757,7 @@ header a:hover { border-color: var(--accent); color: var(--text); }
 .job-actions { margin-top: 6px; }
 .download-btn { font-size: 0.85rem; padding: 9px 20px; }
 
+
 /* Info list */
 .info-list {
   padding-left: 18px;

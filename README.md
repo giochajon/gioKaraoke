@@ -133,6 +133,52 @@ Both the Karaoke Creator and YouTube converter track job progress over Server-Se
 
 ---
 
+## Karaoke Creator
+
+Open **http://localhost:8094/convert.html** to turn any MP3 into a karaoke MP4 with synced, scrolling, highlighted lyrics — entirely on your own infrastructure.
+
+### Pipeline
+
+1. **Vocal separation** — `audio-separator` (`UVR_MDXNET_KARA_2.onnx`, CPU-only ONNX inference) splits the track into instrumental and vocal stems
+2. **Lyrics acquisition** — fetches synced lyrics from [lrclib.net](https://lrclib.net) (free, unauthenticated); falls back to Whisper transcription (`whisper-timestamped`, model `base`) if no match is found
+3. **Sync correction** — cross-correlates the isolated vocals stem against the lrclib timestamps to anchor lyrics to when singing actually starts in *this specific recording*, not the reference track lrclib was synced to (intro-length mismatches of several seconds are common between different releases)
+4. **Subtitle generation** — converts the time-corrected lyrics into an ASS subtitle file with a 5-line scrolling window and karaoke fill effect, baked directly into the video
+5. **Background generation** — PIL-rendered background image
+6. **Render** — FFmpeg burns the scrolling subtitles, silence padding (if needed for the countdown), and instrumental audio into the final MP4
+
+### Scrolling lyrics in the video
+
+The rendered MP4 always shows a **5-line scrolling window** centred on the current line:
+
+| Row | Style | Purpose |
+|-----|-------|---------|
+| Far above | small, dim grey | line sung 2 ago |
+| Near above | medium, light grey | line sung previously |
+| **Centre** | **large, yellow `\kf` fill** | **current line (karaoke highlight)** |
+| Near below | medium, light grey | next upcoming line |
+| Far below | small, dim grey | line after next |
+
+As each line becomes active the stack shifts up, giving a natural scrolling feel. Consecutive lines' display windows always abut so the screen never goes blank during instrumental breaks.
+
+### Countdown
+
+Every video begins with a **5 → 4 → 3 → 2 → 1** countdown (one digit per second) ending exactly when the first lyric starts. If the first lyric begins within the first 5 seconds of the song, the audio is automatically padded with silence so there is always a full 5-second lead-in — no digits are ever truncated.
+
+### Lyrics matching
+
+lrclib.net is queried using both a structured `artist_name` / `track_name` split (when the filename contains ` - `) and a fuzzy `q=` search with all special characters and dashes stripped, ranked by Jaccard word-overlap against the filename. If the lrclib.net call fails transiently (e.g. the container is still under load after CPU-heavy vocal separation), it is retried up to 3 times with backoff before falling back to Whisper.
+
+### Reliability
+
+- Vocal separation has a 40-minute hard timeout; a stuck job fails with a clear error instead of running forever
+- If the processor container restarts mid-job the browser detects 20 seconds of SSE silence and surfaces a "Server stopped responding" error instead of a frozen progress bar
+
+### Lyrics Lookup Tester
+
+Open **http://localhost:8094/lyrics-test.html** (linked from the Karaoke Creator nav) to test lrclib.net matching for any MP3 without running the full conversion pipeline. Drop a file and see exactly which search strategies were tried, every candidate returned with its match score, and a preview of the matched lines — useful for diagnosing filenames that produce a "no lyrics found" result.
+
+---
+
 ## Configuration
 
 All settings are controlled via environment variables (`.env` file or shell environment).
@@ -193,6 +239,7 @@ gioKaraoke/
     ├── karaoke.html           # Karaoke player
     ├── music.html             # Music library player (lyrics + album art)
     ├── youtube.html           # YouTube to MP3 converter
+    ├── convert.html           # MP3 to karaoke MP4 creator
     ├── admin.html             # Library management & indexing
     ├── css/style.css
     └── js/
