@@ -105,7 +105,7 @@ async function startJob(file) {
     const res = await fetch('/api/convert/upload', { method: 'POST', body: form });
     if (!res.ok) {
       const { detail } = await res.json().catch(() => ({}));
-      throw new Error(detail || `Upload failed (${res.status})`);
+      throw new Error(formatErrorDetail(detail, `Upload failed (${res.status})`));
     }
     ({ job_id: jobId, song_title: songTitle } = await res.json());
   } catch (err) {
@@ -118,63 +118,106 @@ async function startJob(file) {
   setStatus(card, 'Queued — waiting for processing slot…');
   card.dataset.jobId = jobId;
 
-  // SSE progress stream
-  const es = new EventSource(`/api/convert/status/${jobId}`);
+  watchConvertJob(jobId, card, songTitle);
+}
 
-  es.onmessage = e => {
-    const data = JSON.parse(e.data);
-    const { status, progress, step, error } = data;
+// ── SSE watcher (with auto-reconnect + stall detection) ───────────────────────
+// The processor's status stream emits a heartbeat every ~1.5s for as long as a
+// job is active, even when nothing's changed — so silence past STALL_TIMEOUT
+// reliably means the connection died or the processor container restarted
+// mid-job (e.g. the host went to sleep), not that a step is just taking a
+// while. Long CPU-bound steps like vocal separation still get regular pings.
+function watchConvertJob(jobId, card, songTitle) {
+  let retries = 0;
+  const MAX_RETRIES = 6;
+  const STALL_TIMEOUT = 20000;
+  let watchdog = null;
 
-    setProgress(card, progress ?? 0);
-    setStatus(card, step || status);
-
-    // Activate pipeline step indicator
-    const stepKey = {
-      separating:  'separate',
-      transcribing:'transcribe',
-      subtitles:   'subtitles',
-      background:  'subtitles',
-      rendering:   'render',
-    }[status];
-    if (stepKey) activateStep(card, stepKey);
-
-    // Highlight global pipeline steps
-    const pipeId = STEP_MAP[status];
-    document.querySelectorAll('.pipe-step').forEach(el => el.classList.remove('pipe-active'));
-    if (pipeId) document.getElementById(pipeId)?.classList.add('pipe-active');
-
-    if (status === 'done') {
+  function armWatchdog(es) {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
       es.close();
-      activateStep(card, 'render');
-      card.classList.add('job-done');
-      const actions = card.querySelector('.job-actions');
-      actions.style.display = 'block';
-      const btn = actions.querySelector('.download-btn');
-      btn.addEventListener('click', () => triggerDownload(jobId, songTitle, btn));
+      handleDisconnect();
+    }, STALL_TIMEOUT);
+  }
+
+  function handleDisconnect() {
+    if (card.classList.contains('job-done') || card.classList.contains('job-error')) return;
+    retries++;
+    if (retries <= MAX_RETRIES) {
+      const delay = Math.min(2000 * retries, 12000);
+      setStatus(card, `⏳ Reconnecting… (${retries}/${MAX_RETRIES})`);
+      setTimeout(connect, delay);
+    } else {
+      card.classList.add('job-error');
+      setStatus(card, '✗ Lost connection after several retries. Refresh the page to check status.');
+    }
+  }
+
+  function connect() {
+    const es = new EventSource(`/api/convert/status/${jobId}`);
+    armWatchdog(es);
+
+    es.onmessage = e => {
+      retries = 0;
+      armWatchdog(es);
+
+      const data = JSON.parse(e.data);
+      const { status, progress, step, error } = data;
+
+      setProgress(card, progress ?? 0);
+      setStatus(card, step || status);
+
+      // Activate pipeline step indicator
+      const stepKey = {
+        separating:  'separate',
+        transcribing:'transcribe',
+        subtitles:   'subtitles',
+        background:  'subtitles',
+        rendering:   'render',
+      }[status];
+      if (stepKey) activateStep(card, stepKey);
+
+      // Highlight global pipeline steps
+      const pipeId = STEP_MAP[status];
       document.querySelectorAll('.pipe-step').forEach(el => el.classList.remove('pipe-active'));
-    }
+      if (pipeId) document.getElementById(pipeId)?.classList.add('pipe-active');
 
-    if (status === 'error') {
-      es.close();
-      card.classList.add('job-error');
-      setStatus(card, `✗ ${error || step}`);
-    }
+      if (status === 'done') {
+        clearTimeout(watchdog);
+        es.close();
+        activateStep(card, 'render');
+        card.classList.add('job-done');
+        const actions = card.querySelector('.job-actions');
+        actions.style.display = 'block';
+        const btn = actions.querySelector('.download-btn');
+        btn.addEventListener('click', () => triggerDownload(jobId, songTitle, btn));
+        document.querySelectorAll('.pipe-step').forEach(el => el.classList.remove('pipe-active'));
+      }
 
-    if (status === 'not_found') {
-      es.close();
-      card.classList.add('job-error');
-      setStatus(card, '✗ Job not found on server.');
-    }
-  };
+      if (status === 'error') {
+        clearTimeout(watchdog);
+        es.close();
+        card.classList.add('job-error');
+        setStatus(card, `✗ ${error || step}`);
+      }
 
-  es.onerror = () => {
-    // SSE closed — if job is not done, mark as network error
-    if (!card.classList.contains('job-done')) {
+      if (status === 'not_found') {
+        clearTimeout(watchdog);
+        es.close();
+        card.classList.add('job-error');
+        setStatus(card, '✗ Job not found on server — the processor may have restarted mid-job. Please retry.');
+      }
+    };
+
+    es.onerror = () => {
+      clearTimeout(watchdog);
       es.close();
-      setStatus(card, '✗ Connection lost. The server may still be processing.');
-      card.classList.add('job-error');
-    }
-  };
+      handleDisconnect();
+    };
+  }
+
+  connect();
 }
 
 // ── Download ──────────────────────────────────────────────────────────────────
@@ -200,6 +243,20 @@ async function triggerDownload(jobId, songTitle, btn) {
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+
+// FastAPI validation errors return `detail` as an array of {loc, msg, type}
+// objects (not a string) — stringifying that directly via `new Error(detail)`
+// produces "[object Object]". Flatten it into something readable instead.
+function formatErrorDetail(detail, fallback) {
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail.map(d => (d && d.msg) ? d.msg : JSON.stringify(d)).join('; ');
+  }
+  if (typeof detail === 'object') return detail.msg || JSON.stringify(detail);
+  return String(detail);
+}
+
 function esc(str) {
   return str.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }

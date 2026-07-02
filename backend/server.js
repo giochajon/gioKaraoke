@@ -11,16 +11,79 @@ const os = require('os');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SONGS_PATH = process.env.SONGS_PATH || '/songs';
+const MUSIC_PATH = process.env.MUSIC_PATH || '/music';
 const MEILI_URL = process.env.MEILISEARCH_URL || 'http://localhost:7700';
 const MEILI_KEY = process.env.MEILISEARCH_KEY || '';
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
 const PROCESSOR_URL = process.env.PROCESSOR_URL || 'http://processor:5000';
+const AUTH_USERNAME = process.env.AUTH_USERNAME || '';
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || '';
 
 const client = new MeiliSearch({ host: MEILI_URL, apiKey: MEILI_KEY });
 
 // Cache for extracted ZIP files: songId -> { audioPath, cdgPath, type, tempDir }
 const zipCache = new Map();
+// Cache for album art lookups: musicId -> artworkUrl|null
+const artworkCache = new Map();
+// Cache for lyrics lookups: musicId -> lyrics text|null
+const lyricsCache = new Map();
+// Cache for resolved track metadata (via iTunes): musicId -> { artist, title, artworkUrl }
+const trackMetaCache = new Map();
 
+// Many library filenames don't follow an "Artist - Title" pattern, so the
+// indexed `artist` field is often blank. iTunes' fuzzy search resolves the
+// real artist/title from just the (cleaned) filename, which both the album
+// art lookup and the lyrics.ovh lookup need to find a match.
+async function resolveTrackMeta(id) {
+  if (trackMetaCache.has(id)) return trackMetaCache.get(id);
+
+  const doc = await client.index('music').getDocument(id);
+  const term = [doc.artist, doc.title].filter(Boolean).join(' ') || doc.title;
+  let meta = { artist: doc.artist || '', title: doc.title, artworkUrl: null };
+
+  try {
+    const searchUrl = `https://itunes.apple.com/search?media=music&limit=1&term=${encodeURIComponent(term)}`;
+    const itunesRes = await fetch(searchUrl);
+    const data = await itunesRes.json();
+    const hit = data.results?.[0];
+    if (hit) {
+      meta = {
+        artist: hit.artistName || meta.artist,
+        title: hit.trackName || meta.title,
+        artworkUrl: hit.artworkUrl100 ? hit.artworkUrl100.replace('100x100', '600x600') : null,
+      };
+    }
+  } catch (_) { /* iTunes lookup failed — fall back to filename-derived metadata */ }
+
+  trackMetaCache.set(id, meta);
+  return meta;
+}
+
+// ─── Basic Auth ───────────────────────────────────────────────────────────────
+
+function safeEqual(a, b) {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function basicAuth(req, res, next) {
+  if (!AUTH_USERNAME || !AUTH_PASSWORD) return next(); // auth disabled if unset
+
+  const header = req.headers.authorization || '';
+  const [scheme, encoded] = header.split(' ');
+  if (scheme === 'Basic' && encoded) {
+    const [user, pass] = Buffer.from(encoded, 'base64').toString().split(':');
+    if (user && pass && safeEqual(user, AUTH_USERNAME) && safeEqual(pass, AUTH_PASSWORD)) {
+      return next();
+    }
+  }
+  res.set('WWW-Authenticate', 'Basic realm="gioKaraoke"');
+  res.status(401).send('Authentication required.');
+}
+
+app.use(basicAuth);
 app.use(express.json());
 app.use(express.static(FRONTEND_DIR));
 
@@ -36,6 +99,18 @@ async function setupMeilisearch() {
     searchableAttributes: ['title', 'filename'],
     filterableAttributes: ['type'],
     displayedAttributes: ['id', 'title', 'filename', 'extension', 'type', 'path'],
+    rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
+  });
+
+  try {
+    await client.createIndex('music', { primaryKey: 'id' });
+  } catch (_) { /* index already exists */ }
+
+  const musicIndex = client.index('music');
+  await musicIndex.updateSettings({
+    searchableAttributes: ['title', 'artist', 'filename'],
+    filterableAttributes: ['type'],
+    displayedAttributes: ['id', 'title', 'artist', 'filename', 'extension', 'type', 'path'],
     rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
   });
 }
@@ -68,8 +143,23 @@ function pathToId(p) {
 
 function getMimeType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
-  return { '.mp3': 'audio/mpeg', '.mp4': 'video/mp4', '.cdg': 'application/octet-stream' }[ext]
-    || 'application/octet-stream';
+  return {
+    '.mp3': 'audio/mpeg',
+    '.mp4': 'video/mp4',
+    '.cdg': 'application/octet-stream',
+    '.flac': 'audio/flac',
+  }[ext] || 'application/octet-stream';
+}
+
+function parseArtistTitle(filename) {
+  // Split on the raw filename's " - " separator *before* cleanTitle runs —
+  // cleanTitle collapses "-" into a space (it treats it like "_"/"."), so
+  // splitting on the cleaned string never finds the separator.
+  const match = filename.match(/^(.+?)\s+-\s+(.+)$/);
+  if (match) {
+    return { artist: cleanTitle(match[1]), title: cleanTitle(match[2]) };
+  }
+  return { artist: '', title: cleanTitle(filename) };
 }
 
 function streamFile(req, res, filePath, mime) {
@@ -185,6 +275,100 @@ app.get('/api/songs/:id/cdg', async (req, res) => {
   }
 });
 
+// ─── Music Library Routes ──────────────────────────────────────────────────────
+
+app.get('/api/music/search', async (req, res) => {
+  try {
+    const q = req.query.q || '';
+    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+    const results = await client.index('music').search(q, { limit });
+    res.json(results);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/music/:id/info', async (req, res) => {
+  try {
+    const doc = await client.index('music').getDocument(req.params.id);
+    res.json(doc);
+  } catch (e) {
+    res.status(404).json({ error: 'Track not found' });
+  }
+});
+
+app.get('/api/music/:id/audio', async (req, res) => {
+  try {
+    const doc = await client.index('music').getDocument(req.params.id);
+    const audioPath = doc.path + '.' + doc.extension;
+    streamFile(req, res, audioPath);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/music/:id/albumart', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (artworkCache.has(id)) {
+      const cached = artworkCache.get(id);
+      return cached ? res.json({ artworkUrl: cached }) : res.status(404).json({ error: 'No artwork found' });
+    }
+
+    const meta = await resolveTrackMeta(id);
+    artworkCache.set(id, meta.artworkUrl);
+    if (meta.artworkUrl) {
+      res.json({ artworkUrl: meta.artworkUrl });
+    } else {
+      res.status(404).json({ error: 'No artwork found' });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+async function lookupLyrics(artist, title) {
+  if (!artist || !title) return null;
+  const url = `https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`;
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+  return (data.lyrics || '').trim() || null;
+}
+
+// Fetches plain-text lyrics from the free lyrics.ovh API. Tries the filename-
+// parsed artist/title first (it's often already correct and more literal to
+// what's on disk), and only falls back to the iTunes-resolved metadata —
+// which can occasionally match the wrong recording — if that comes up empty.
+app.get('/api/music/:id/lyrics', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (lyricsCache.has(id)) {
+      const cached = lyricsCache.get(id);
+      return cached ? res.json({ lyrics: cached }) : res.status(404).json({ error: 'No lyrics found' });
+    }
+
+    const doc = await client.index('music').getDocument(id);
+    let lyrics = await lookupLyrics(doc.artist, doc.title);
+
+    if (!lyrics) {
+      const meta = await resolveTrackMeta(id);
+      lyrics = await lookupLyrics(meta.artist, meta.title);
+      if (!lyrics) {
+        console.error(`[lyrics] no match for "${id}" — tried ("${doc.artist}", "${doc.title}") and iTunes-resolved ("${meta.artist}", "${meta.title}")`);
+      }
+    }
+
+    lyricsCache.set(id, lyrics);
+    if (lyrics) {
+      res.json({ lyrics });
+    } else {
+      res.status(404).json({ error: 'No lyrics found' });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Admin Routes ─────────────────────────────────────────────────────────────
 
 app.post('/api/admin/index', async (req, res) => {
@@ -251,6 +435,53 @@ app.get('/api/admin/stats', async (req, res) => {
   }
 });
 
+app.post('/api/admin/music/index', async (req, res) => {
+  try {
+    const allFiles = walkDir(MUSIC_PATH);
+
+    const documents = [];
+    for (const file of allFiles) {
+      const ext = path.extname(file).toLowerCase();
+      if (!['.mp3', '.flac'].includes(ext)) continue;
+
+      const base = file.slice(0, -ext.length);
+      const filename = path.basename(base);
+      const { artist, title } = parseArtistTitle(filename);
+
+      documents.push({
+        id: pathToId(base + ext),
+        title,
+        artist,
+        filename,
+        extension: ext.slice(1),
+        type: ext.slice(1),
+        path: base,
+      });
+    }
+
+    const index = client.index('music');
+    await index.deleteAllDocuments();
+
+    const BATCH = 1000;
+    for (let i = 0; i < documents.length; i += BATCH) {
+      await index.addDocuments(documents.slice(i, i + BATCH));
+    }
+
+    res.json({ indexed: documents.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/music/stats', async (req, res) => {
+  try {
+    const stats = await client.index('music').getStats();
+    res.json(stats);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Converter proxy → Python processor service ───────────────────────────────
 // Pipes all /api/convert/* and /api/youtube/* requests to the processor.
 //
@@ -262,11 +493,13 @@ function proxyToProcessor(prefix) {
   return (req, res) => {
     const target = new URL(PROCESSOR_URL);
 
-    // If express.json() already parsed the body, re-serialise it into a Buffer
-    // so we can set an explicit Content-Length and call proxyReq.end().
-    // Without this, piping an already-consumed stream never calls end() on the
-    // upstream request and FastAPI waits forever.
-    const preBody = req.body !== undefined
+    // Body-parser defaults req.body to {} for every request (not just JSON
+    // ones), so `req.body !== undefined` can't tell us whether express.json()
+    // actually consumed the stream. Key off the real Content-Type instead —
+    // that's the only reliable signal, and it's what express.json() itself
+    // uses to decide whether to parse. Anything else (multipart, GET, SSE)
+    // must be piped raw or the upstream request body gets silently replaced.
+    const preBody = req.is('application/json')
       ? Buffer.from(JSON.stringify(req.body))
       : null;
 

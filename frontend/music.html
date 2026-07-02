@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gioKaraoke — Music</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>🎧 gioKaraoke</h1>
+    <nav class="header-nav">
+      <a href="/">◀ Home</a>
+      <a href="/karaoke.html">🎤 Karaoke</a>
+    </nav>
+  </header>
+
+  <div class="main-layout">
+    <!-- ── Left panel: search + queue ── -->
+    <aside class="left-panel">
+      <div class="music-index-bar">
+        <span id="music-index-count" class="music-index-count">— tracks indexed</span>
+        <button id="btn-index-music" class="music-index-btn" title="Scan MUSIC_PATH and rebuild the music search index">⚡ Index Music</button>
+      </div>
+
+      <div class="search-section">
+        <div class="search-container">
+          <input type="text" id="search-input" placeholder="Search music…" autocomplete="off" spellcheck="false">
+          <div id="search-results" class="search-dropdown hidden"></div>
+        </div>
+      </div>
+
+      <div class="queue-section">
+        <div class="queue-header">
+          Queue <span id="queue-count"></span>
+          <label class="queue-auto-remove" title="Remove song from queue after it finishes playing">
+            <input type="checkbox" id="auto-remove">
+            <span>Auto-remove played</span>
+          </label>
+        </div>
+
+        <div id="queue-list">
+          <div class="queue-empty">
+            Search for a track above<br>and add it to the queue.
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── Right panel: player ── -->
+    <main class="player-section">
+      <div class="display-area">
+        <div class="display-idle" id="idle-screen">
+          <div class="idle-icon">🎧</div>
+          <p>Add tracks to the queue to begin</p>
+        </div>
+        <div id="lyrics-display" class="lyrics-display hidden"></div>
+        <img id="album-art" class="album-art-corner hidden" alt="Album art">
+      </div>
+
+      <div class="controls">
+        <div class="now-playing-row">
+          <span id="now-playing">— nothing playing —</span>
+          <span id="song-type-badge"></span>
+        </div>
+        <div class="progress-row">
+          <span class="time" id="time-current">0:00</span>
+          <div id="progress-bar"><div id="progress-fill"></div></div>
+          <span class="time" id="time-duration">0:00</span>
+        </div>
+        <div class="btn-row">
+          <button class="ctrl-btn" id="btn-prev" title="Previous">⏮</button>
+          <button class="ctrl-btn" id="btn-play" title="Play / Pause">▶</button>
+          <button class="ctrl-btn" id="btn-next" title="Next">⏭</button>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="/js/music.js"></script>
+</body>
+</html>

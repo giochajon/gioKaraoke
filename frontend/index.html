@@ -7,75 +7,26 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-<div class="app">
+<div class="app" style="display:block; height:100vh;">
   <header>
     <h1>🎤 gioKaraoke</h1>
-    <nav class="header-nav">
-      <a href="/convert.html">🎬 Karaoke Creator</a>
-      <a href="/youtube.html">🎵 YouTube → MP3</a>
-      <a href="/admin.html">⚙ Library</a>
-    </nav>
   </header>
 
-  <div class="main-layout">
-    <!-- ── Left panel: search + queue ── -->
-    <aside class="left-panel">
-      <div class="search-section">
-        <div class="search-container">
-          <input type="text" id="search-input" placeholder="Search songs…" autocomplete="off" spellcheck="false">
-          <div id="search-results" class="search-dropdown hidden"></div>
-        </div>
-      </div>
-
-      <div class="queue-section">
-        <div class="queue-header">
-          Queue <span id="queue-count"></span>
-          <label class="queue-auto-remove" title="Remove song from queue after it finishes playing">
-            <input type="checkbox" id="auto-remove">
-            <span>Auto-remove played</span>
-          </label>
-        </div>
-
-        <div id="queue-list">
-          <div class="queue-empty">
-            Search for a song above<br>and add it to the queue.
-          </div>
-        </div>
-      </div>
-    </aside>
-
-    <!-- ── Right panel: player ── -->
-    <main class="player-section">
-      <div class="display-area">
-        <div class="display-idle" id="idle-screen">
-          <div class="idle-icon">🎤</div>
-          <p>Add songs to the queue to begin</p>
-        </div>
-        <canvas id="cdg-canvas" style="display:none"></canvas>
-        <video id="video-player" controls style="display:none"></video>
-      </div>
-
-      <div class="controls">
-        <div class="now-playing-row">
-          <span id="now-playing">— nothing playing —</span>
-          <span id="song-type-badge"></span>
-        </div>
-        <div class="progress-row">
-          <span class="time" id="time-current">0:00</span>
-          <div id="progress-bar"><div id="progress-fill"></div></div>
-          <span class="time" id="time-duration">0:00</span>
-        </div>
-        <div class="btn-row">
-          <button class="ctrl-btn" id="btn-prev" title="Previous">⏮</button>
-          <button class="ctrl-btn" id="btn-play" title="Play / Pause">▶</button>
-          <button class="ctrl-btn" id="btn-next" title="Next">⏭</button>
-        </div>
-      </div>
-    </main>
+  <div class="landing-wrap">
+    <p class="landing-sub">Choose what you'd like to open.</p>
+    <div class="landing-choices">
+      <a class="landing-card" href="/karaoke.html">
+        <div class="landing-icon">🎤</div>
+        <div class="landing-title">Karaoke</div>
+        <div class="landing-desc">Search, queue, and sing along with CDG / MP4 karaoke tracks.</div>
+      </a>
+      <a class="landing-card" href="/music.html">
+        <div class="landing-icon">🎧</div>
+        <div class="landing-title">Music Library</div>
+        <div class="landing-desc">Search and queue your MP3 / FLAC music with lyrics and album art.</div>
+      </a>
+    </div>
   </div>
 </div>
-
-<script src="/js/cdg-renderer.js"></script>
-<script src="/js/app.js"></script>
 </body>
 </html>
