@@ -190,12 +190,21 @@ def _ts(seconds: float) -> str:
 _COUNTDOWN_DIGITS = ["5", "4", "3", "2", "1"]
 _COUNTDOWN_TOTAL = float(len(_COUNTDOWN_DIGITS))   # 5.0 s
 
+# Instrumental breaks longer than this get the same "5.. 4.. 3.. 2.. 1.."
+# treatment as the intro, timed to end exactly when the next line starts.
+# Shorter gaps (the normal breathing room between lines) just hold the
+# previous line on screen — no countdown clutter for a 2-3 second pause.
+_GAP_THRESHOLD = 15.0
+
 
 def _render_scrolling_ass(items: list[dict], tmpdir: str, offset: float = 0.0) -> tuple[str, float]:
     """
     items: chronological [{t0, t1, active, plain}], where `active` is the
-    text (with \\kf karaoke-fill tags) shown while that line is current, and
-    `plain` is its plain-text form shown when it's a neighbour.
+    text (with \\kf karaoke-fill tags) shown while that line is current,
+    `plain` is its plain-text form shown when it's a neighbour, and `t1` is
+    the line's own natural end (when it's done being sung) — NOT stretched
+    to the next line's start; this function decides how long each line
+    actually stays on screen.
 
     `offset` shifts every timestamp by this many seconds, to compensate for
     a mismatch between when the lyric source thinks the vocal starts and
@@ -222,17 +231,46 @@ def _render_scrolling_ass(items: list[dict], tmpdir: str, offset: float = 0.0) -
             ]
 
     n = len(items)
-    dialogue = []
+
+    # Decide each line's on-screen end time: stretch to the next line's start
+    # so short pauses never go blank, unless the gap is long enough that a
+    # countdown should fill the final seconds instead of a frozen line.
+    gap_countdowns: list[tuple[float, float, str]] = []
+    display_items = []
     for i, item in enumerate(items):
+        if i + 1 < n:
+            next_t0 = items[i + 1]["t0"]
+            gap = next_t0 - item["t1"]
+            if gap > _GAP_THRESHOLD:
+                countdown_start = next_t0 - _COUNTDOWN_TOTAL
+                for k, digit in enumerate(_COUNTDOWN_DIGITS):
+                    seg_start = countdown_start + k
+                    gap_countdowns.append((seg_start, seg_start + 1.0, digit))
+                display_t1 = countdown_start
+            else:
+                display_t1 = next_t0
+        else:
+            display_t1 = item["t1"]
+        display_items.append({**item, "t1": display_t1})
+
+    dialogue = []
+    for i, item in enumerate(display_items):
         t0, t1 = _ts(item["t0"]), _ts(item["t1"])
         for row_offset, (x, y, style) in _SCROLL_ROWS.items():
             j = i + row_offset
             if j < 0 or j >= n:
                 continue
-            text = items[j]["active"] if row_offset == 0 else items[j]["plain"]
+            text = display_items[j]["active"] if row_offset == 0 else display_items[j]["plain"]
             dialogue.append(
                 f"Dialogue: 0,{t0},{t1},{style},,0,0,0,,{{\\an5\\pos({x},{y})}}{text}"
             )
+
+    x0, y0, _ = _SCROLL_ROWS[0]
+    for seg_start, seg_end, digit in gap_countdowns:
+        dialogue.append(
+            f"Dialogue: 0,{_ts(seg_start)},{_ts(seg_end)},Countdown,,0,0,0,,"
+            f"{{\\an5\\pos({x0},{y0})}}{digit}"
+        )
 
     if items:
         countdown_end = items[0]["t0"]   # always >= _COUNTDOWN_TOTAL after padding
@@ -450,18 +488,15 @@ def lrc_to_ass(lrc_lines: list[dict], tmpdir: str, offset: float = 0.0) -> tuple
     items = []
     for i, line in enumerate(lrc_lines):
         t0 = line["time"]
-        is_last = i + 1 >= len(lrc_lines)
-        # The on-screen window always runs to the next line so nothing goes
-        # blank between lines, even across long instrumental breaks.
-        t1 = t0 + 6.0 if is_last else lrc_lines[i + 1]["time"]
-        # The \kf fill should finish when the singing finishes, not when the
-        # next lyric line starts.  With only line-level timestamps we estimate
-        # sung duration from character count (~12 chars / second, bounded to
-        # [1.5 s, 6 s]).  This prevents the highlight from crawling slowly
-        # through text during long instrumental gaps.
+        # With only line-level timestamps we estimate sung duration from
+        # character count (~12 chars / second, bounded to [1.5 s, 6 s]) —
+        # this is the line's natural end, when it's actually done being
+        # sung. _render_scrolling_ass decides how long it stays on screen
+        # after that (stretched to the next line, or replaced by a
+        # countdown across a long instrumental break).
         est_sung = max(1.5, min(6.0, len(line["text"]) / 12.0))
-        fill_t1 = min(t1, t0 + est_sung)
-        duration_cs = max(1, round((fill_t1 - t0) * 100))
+        t1 = t0 + est_sung
+        duration_cs = max(1, round((t1 - t0) * 100))
         items.append({
             "t0": t0, "t1": t1,
             "active": f"{{\\kf{duration_cs}}}{line['text']}",

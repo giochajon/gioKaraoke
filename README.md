@@ -84,6 +84,7 @@ MP3+CDG pairs are matched by sharing the same base filename in the same director
 - **Auto-remove** — checkbox to remove songs from the queue after they finish playing
 - **CDG canvas** — synchronized karaoke lyrics rendered in the browser via Canvas API (300×216 px native, 75 packets/sec)
 - **Progress bar** — click to seek
+- **Responsive layout** — below 860px the search/queue sidebar stacks above the player instead of squeezing it into a sliver, and controls shrink further below 480px; desktop's fixed sidebar + player grid is unchanged
 
 ---
 
@@ -164,6 +165,8 @@ As each line becomes active the stack shifts up, giving a natural scrolling feel
 
 Every video begins with a **5 → 4 → 3 → 2 → 1** countdown (one digit per second) ending exactly when the first lyric starts. If the first lyric begins within the first 5 seconds of the song, the audio is automatically padded with silence so there is always a full 5-second lead-in — no digits are ever truncated.
 
+The same countdown reappears mid-song: any instrumental break longer than 15 seconds ends with a **5 → 4 → 3 → 2 → 1** count-in timed to land exactly on the next line, instead of leaving the previous line frozen on screen for the whole gap. Shorter pauses between lines are unaffected — the previous line just holds until the next one starts.
+
 ### Lyrics matching
 
 lrclib.net is queried using both a structured `artist_name` / `track_name` split (when the filename contains ` - `) and a fuzzy `q=` search with all special characters and dashes stripped, ranked by Jaccard word-overlap against the filename. If the lrclib.net call fails transiently (e.g. the container is still under load after CPU-heavy vocal separation), it is retried up to 3 times with backoff before falling back to Whisper.
@@ -234,6 +237,9 @@ gioKaraoke/
 │   ├── Dockerfile             # Python 3.11-slim + FFmpeg + yt-dlp + Node.js
 │   ├── requirements.txt
 │   └── app.py                 # FastAPI: YouTube download + audio transcoding/enhancement
+├── scripts/
+│   ├── diag-music-walk.sh      # Diagnoses MUSIC_PATH indexing gaps (symlinks, unreadable dirs)
+│   └── walk-diag.js            # Node walker used inside the app container by diag-music-walk.sh
 └── frontend/
     ├── index.html             # Landing page (Karaoke / Music Library)
     ├── karaoke.html           # Karaoke player
