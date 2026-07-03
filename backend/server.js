@@ -117,15 +117,27 @@ async function setupMeilisearch() {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function walkDir(dir) {
-  const results = [];
+// `results` is an accumulator passed by reference, not returned-and-spread —
+// `results.push(...walkDir(full))` blows V8's ~65k call-argument limit on
+// subtrees with that many files (this library has several), throwing
+// RangeError: Maximum call stack size exceeded. Wrapping the whole loop in
+// one try/catch then silently swallowed that error and dropped every
+// remaining sibling in the current directory, which is why entire library
+// folders (anything after the offending one in readdir order) went missing
+// from the index without any error surfacing.
+function walkDir(dir, results = []) {
+  let entries;
   try {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) results.push(...walkDir(full));
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (_) { return results; }
+
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) walkDir(full, results);
       else if (entry.isFile()) results.push(full);
-    }
-  } catch (_) { /* unreadable dir */ }
+    } catch (_) { /* unreadable/broken entry — skip just this one */ }
+  }
   return results;
 }
 
