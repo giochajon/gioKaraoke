@@ -26,15 +26,19 @@ html, body {
 /* ─── Layout ───────────────────────────────────────────────────────── */
 .app {
   display: grid;
-  grid-template-rows: 48px 1fr;
+  grid-template-rows: auto 1fr;
   height: 100vh;
+  height: 100dvh;
 }
 
 header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  min-height: 48px;
+  padding: 8px 16px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   z-index: 10;
@@ -891,4 +895,62 @@ header a:hover { border-color: var(--accent); color: var(--text); }
 .conv-toast.visible {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+}
+
+/* ─── Responsive: player pages (karaoke.html / music.html / landing) ────
+   Desktop keeps the fixed 320px sidebar + player grid untouched; below
+   these breakpoints the sidebar (search + queue) stacks above the player
+   instead of squeezing it into a sliver, and controls/header shrink to fit.
+   Nothing here removes elements or changes JS-driven behavior — only the
+   CSS layout reflows. ─────────────────────────────────────────────────── */
+@media (max-width: 860px) {
+  header { padding: 8px 12px; }
+  header h1 { font-size: 1.05rem; letter-spacing: 1px; }
+  .header-nav { gap: 6px; }
+  header a { font-size: 0.72rem; padding: 3px 8px; }
+
+  .main-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(140px, 38vh) 1fr;
+  }
+
+  .left-panel {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    /* Let the search-results dropdown float over the player below instead
+       of being clipped at the panel's shorter mobile height. */
+    overflow: visible;
+  }
+
+  .album-art-corner { width: 96px; height: 96px; }
+  .lyrics-display { padding: 20px 16px; }
+}
+
+@media (max-width: 480px) {
+  header h1 { font-size: 0.95rem; }
+  header a { font-size: 0.68rem; padding: 3px 7px; }
+
+  .main-layout {
+    grid-template-rows: minmax(120px, 34vh) 1fr;
+  }
+
+  .controls { padding: 8px 10px; }
+  .ctrl-btn { width: 38px; height: 38px; font-size: 0.9rem; }
+  #btn-play { width: 46px; height: 46px; font-size: 1.15rem; }
+  .now-playing-row { gap: 8px; }
+  #now-playing { font-size: 0.85rem; }
+
+  .album-art-corner { width: 76px; height: 76px; bottom: 10px; right: 10px; }
+  .lyrics-display { padding: 16px 12px; }
+  .lyrics-line { font-size: 1rem; }
+
+  .landing-wrap { margin: 32px auto; }
+  .landing-icon { font-size: 2.2rem; }
+  .landing-card { padding: 24px 16px; }
+}
+
+/* Very short viewports (landscape phones): shrink the sidebar further so
+   the player still gets most of the vertical space. */
+@media (max-height: 480px) and (max-width: 860px) {
+  .main-layout { grid-template-rows: minmax(100px, 30vh) 1fr; }
 }
