@@ -190,6 +190,8 @@ All settings are controlled via environment variables (`.env` file or shell envi
 |----------|---------|-------------|
 | `SONGS_PATH` | `./songs` | Host path to your karaoke files directory |
 | `MUSIC_PATH` | `./music` | Host path to your MP3 / FLAC music directory |
+| `MUSIC_INCLUDE_DIRS` | *(blank)* | Comma-separated top-level subfolders of `MUSIC_PATH` to index — everything else under `MUSIC_PATH` is skipped. Takes precedence over `MUSIC_EXCLUDE_DIRS` |
+| `MUSIC_EXCLUDE_DIRS` | *(blank)* | Comma-separated top-level subfolders of `MUSIC_PATH` to skip. Ignored if `MUSIC_INCLUDE_DIRS` is set |
 | `MEILI_MASTER_KEY` | `karaoke-secret-key` | Meilisearch master key — change this in any non-local deployment |
 | `AUTH_USERNAME` | *(blank)* | HTTP Basic Auth username — leave blank to disable login |
 | `AUTH_PASSWORD` | *(blank)* | HTTP Basic Auth password — leave blank to disable login |

@@ -31,6 +31,8 @@ services:
       - MEILISEARCH_KEY=${MEILI_MASTER_KEY:-karaoke-secret-key}
       - SONGS_PATH=/songs
       - MUSIC_PATH=/music
+      - MUSIC_INCLUDE_DIRS=${MUSIC_INCLUDE_DIRS:-}
+      - MUSIC_EXCLUDE_DIRS=${MUSIC_EXCLUDE_DIRS:-}
       - PORT=3000
       - PROCESSOR_URL=http://processor:5000
       - AUTH_USERNAME=${AUTH_USERNAME:-}

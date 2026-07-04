@@ -12,6 +12,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const SONGS_PATH = process.env.SONGS_PATH || '/songs';
 const MUSIC_PATH = process.env.MUSIC_PATH || '/music';
+// Comma-separated top-level subfolder names, relative to MUSIC_PATH, to scope
+// indexing to (whitelist) or skip (blacklist). INCLUDE wins if both are set —
+// there's no reason to exclude from an already-explicit whitelist.
+const MUSIC_INCLUDE_DIRS = (process.env.MUSIC_INCLUDE_DIRS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const MUSIC_EXCLUDE_DIRS = (process.env.MUSIC_EXCLUDE_DIRS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
 const MEILI_URL = process.env.MEILISEARCH_URL || 'http://localhost:7700';
 const MEILI_KEY = process.env.MEILISEARCH_KEY || '';
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
@@ -117,16 +124,48 @@ async function setupMeilisearch() {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function walkDir(dir) {
-  const results = [];
+// `results` is an accumulator passed by reference, not returned-and-spread —
+// `results.push(...walkDir(full))` blows V8's ~65k call-argument limit on
+// subtrees with that many files (this library has several), throwing
+// RangeError: Maximum call stack size exceeded. Wrapping the whole loop in
+// one try/catch then silently swallowed that error and dropped every
+// remaining sibling in the current directory, which is why entire library
+// folders (anything after the offending one in readdir order) went missing
+// from the index without any error surfacing.
+function walkDir(dir, results = []) {
+  let entries;
   try {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) results.push(...walkDir(full));
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (_) { return results; }
+
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) walkDir(full, results);
       else if (entry.isFile()) results.push(full);
-    }
-  } catch (_) { /* unreadable dir */ }
+    } catch (_) { /* unreadable/broken entry — skip just this one */ }
+  }
   return results;
+}
+
+// Resolves which top-level subfolders of MUSIC_PATH to walk, per
+// MUSIC_INCLUDE_DIRS / MUSIC_EXCLUDE_DIRS. Falls back to MUSIC_PATH itself
+// when neither is configured.
+function musicIndexRoots() {
+  if (MUSIC_INCLUDE_DIRS.length) {
+    return MUSIC_INCLUDE_DIRS.map(name => path.join(MUSIC_PATH, name));
+  }
+  if (MUSIC_EXCLUDE_DIRS.length) {
+    const excluded = new Set(MUSIC_EXCLUDE_DIRS);
+    let entries;
+    try {
+      entries = fs.readdirSync(MUSIC_PATH, { withFileTypes: true });
+    } catch (_) { return [MUSIC_PATH]; }
+    return entries
+      .filter(e => e.isDirectory() && !excluded.has(e.name))
+      .map(e => path.join(MUSIC_PATH, e.name));
+  }
+  return [MUSIC_PATH];
 }
 
 function cleanTitle(filename) {
@@ -437,7 +476,7 @@ app.get('/api/admin/stats', async (req, res) => {
 
 app.post('/api/admin/music/index', async (req, res) => {
   try {
-    const allFiles = walkDir(MUSIC_PATH);
+    const allFiles = musicIndexRoots().flatMap(root => walkDir(root));
 
     const documents = [];
     for (const file of allFiles) {
