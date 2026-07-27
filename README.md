@@ -59,7 +59,9 @@ Both indexers scan their respective mounted directories (`/songs`, `/music`), fi
 
 ### 5. Start singing (or listening)
 
-Open **http://localhost:8094** — if a login is configured, enter the `AUTH_USERNAME` / `AUTH_PASSWORD` credentials — then choose **Karaoke** or **Music Library**, search, and add tracks to the queue.
+Open **http://localhost:8094** — if a login is configured, enter the `AUTH_USERNAME` / `AUTH_PASSWORD` credentials — then choose **Karaoke**, **Music Library**, **YouTube → MP3**, or **Karaoke Creator** from the landing page, search, and add tracks to the queue.
+
+Every page shares the same top navigation bar, so you can jump between all four tools plus the Library admin page from wherever you are.
 
 ---
 
@@ -81,6 +83,7 @@ MP3+CDG pairs are matched by sharing the same base filename in the same director
 - **Search as you type** — Meilisearch-powered instant search with format icons
 - **Queue** — scrollable list; currently playing song is highlighted
 - **Controls** — previous / play-pause / next; click any queue item to jump to it
+- **Copy file path** — 📋 button on each queue item copies its underlying file path to the clipboard
 - **Auto-remove** — checkbox to remove songs from the queue after they finish playing
 - **CDG canvas** — synchronized karaoke lyrics rendered in the browser via Canvas API (300×216 px native, 75 packets/sec)
 - **Progress bar** — click to seek
@@ -94,7 +97,7 @@ Open **http://localhost:8094/music.html** to search and queue your MP3 / FLAC mu
 
 ### Features
 
-- **Search & queue** — same Meilisearch-powered instant search and queue UX as the karaoke player
+- **Search & queue** — same Meilisearch-powered instant search and queue UX as the karaoke player, including the 📋 copy-file-path button on each queue item
 - **MP3 + FLAC playback** — lossless FLAC files stream and play natively in the browser
 - **Lyrics** — full lyric sheet pulled from the free lyrics.ovh API based on the track's artist/title, shown in the main display area (not synced to playback — internet lyrics have no timestamps)
 - **Album art** — fetched from the free iTunes Search API based on the track's artist/title and shown in the corner of the display area
@@ -243,7 +246,7 @@ gioKaraoke/
 │   ├── diag-music-walk.sh      # Diagnoses MUSIC_PATH indexing gaps (symlinks, unreadable dirs)
 │   └── walk-diag.js            # Node walker used inside the app container by diag-music-walk.sh
 └── frontend/
-    ├── index.html             # Landing page (Karaoke / Music Library)
+    ├── index.html             # Landing page (Karaoke / Music Library / YouTube → MP3 / Karaoke Creator)
     ├── karaoke.html           # Karaoke player
     ├── music.html             # Music library player (lyrics + album art)
     ├── youtube.html           # YouTube to MP3 converter
