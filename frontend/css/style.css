@@ -232,7 +232,7 @@ header a:hover { border-color: var(--accent); color: var(--text); }
 .q-icon { font-size: 0.9rem; flex-shrink: 0; }
 .q-title { flex: 1; font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.q-remove {
+.q-remove, .q-copy {
   background: none;
   border: none;
   color: var(--text-dim);
@@ -244,8 +244,10 @@ header a:hover { border-color: var(--accent); color: var(--text); }
   opacity: 0;
   transition: opacity 0.15s, color 0.15s;
 }
-.queue-item:hover .q-remove { opacity: 1; }
+.queue-item:hover .q-remove, .queue-item:hover .q-copy { opacity: 1; }
 .q-remove:hover { color: var(--danger); }
+.q-copy:hover { color: var(--accent); }
+.q-copy.copied { opacity: 1; color: var(--accent); }
 
 .queue-empty {
   padding: 32px 16px;
@@ -549,7 +551,7 @@ header a:hover { border-color: var(--accent); color: var(--text); }
 }
 .landing-choices {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 20px;
 }
 .landing-card {

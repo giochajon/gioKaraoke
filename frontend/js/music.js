@@ -82,6 +82,7 @@ class Queue {
         <span class="q-num">${i + 1}</span>
         <span class="q-icon">${typeIcon(song.type)}</span>
         <span class="q-title">${esc(song.artist ? `${song.artist} — ${song.title}` : song.title)}</span>
+        <button class="q-copy" data-idx="${i}" title="Copy file path">📋</button>
         <button class="q-remove" data-idx="${i}" title="Remove">✕</button>
       `;
       el.appendChild(div);
@@ -233,9 +234,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Queue list events (delegated)
   document.getElementById('queue-list').addEventListener('click', e => {
+    const copyBtn   = e.target.closest('.q-copy');
     const removeBtn = e.target.closest('.q-remove');
     const item      = e.target.closest('.queue-item');
-    if (removeBtn) {
+    if (copyBtn) {
+      copyQueuedPath(copyBtn, parseInt(copyBtn.dataset.idx));
+    } else if (removeBtn) {
       queue.remove(parseInt(removeBtn.dataset.idx));
     } else if (item) {
       playFromQueue(parseInt(item.dataset.idx));
@@ -346,6 +350,41 @@ function closeSearch() {
 }
 
 // ─── Queue Management ─────────────────────────────────────────────────────────
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  // Fallback for non-secure contexts (e.g. plain-HTTP LAN access).
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+    return Promise.resolve();
+  } catch (e) {
+    return Promise.reject(e);
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
+
+function copyQueuedPath(btn, idx) {
+  const song = queue.items[idx];
+  if (!song || !song.path) return;
+  copyToClipboard(song.path).then(() => {
+    const original = btn.textContent;
+    btn.textContent = '✓';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove('copied');
+    }, 1200);
+  }).catch(() => {});
+}
 
 function addToQueue(song) {
   const wasEmpty = queue.items.length === 0;
