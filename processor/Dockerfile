@@ -24,6 +24,15 @@ COPY app.py .
 
 ENV MODEL_CACHE=/model_cache
 
+RUN mkdir -p "$MODEL_CACHE" \
+    && groupadd --gid 1000 appuser \
+    && useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser \
+    && chown -R appuser:appuser /app "$MODEL_CACHE"
+USER appuser
+
 EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:5000/ || exit 1
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5000"]
