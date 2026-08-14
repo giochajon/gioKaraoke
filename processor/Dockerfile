@@ -7,8 +7,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     python3-dev \
     curl \
+    unzip \
     nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# yt-dlp needs a JS runtime to decipher YouTube's signature/nsig challenges;
+# without one it falls back to a reduced client set (no JS runtime = fewer
+# formats, more frequent 403s from googlevideo). Debian's nodejs package is
+# too old for yt-dlp's Node support (needs >=22), so install deno — yt-dlp's
+# default runtime, auto-detected with no extra config.
+ENV DENO_INSTALL=/usr/local
+RUN curl -fsSL https://deno.land/install.sh | sh -s -- -y --no-modify-path
 
 WORKDIR /app
 
