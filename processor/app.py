@@ -1038,8 +1038,31 @@ async def process_youtube_job(
                 "outtmpl": os.path.join(tmpdir, "raw_audio.%(ext)s"),
                 "progress_hooks": [_hook],
             }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+
+            # YouTube intermittently 403s a freshly-signed stream URL for
+            # reasons unrelated to the video or client used — observed to
+            # fail roughly 1 in 3 attempts even on ordinary public videos.
+            # Retrying the same URL just repeats the same failure; re-running
+            # the whole download forces yt-dlp to re-extract and sign a new
+            # one, which is usually enough on its own.
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        ydl.download([url])
+                    return
+                except Exception as exc:
+                    if "403" not in str(exc) or attempt == max_attempts:
+                        raise
+                    print(
+                        f"[yt-dlp] Download got a 403 (attempt {attempt}/{max_attempts}) "
+                        "— retrying with a fresh extraction…", flush=True,
+                    )
+                    update_yt_job(
+                        job_id,
+                        step=f"Download blocked, retrying… (attempt {attempt + 1}/{max_attempts})",
+                    )
+                    time.sleep(2)
 
         async def _heartbeat_download():
             async with _YT_CONCURRENCY:
