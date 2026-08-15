@@ -895,6 +895,13 @@ async def health():
 SONGS_PATH = os.environ.get("SONGS_PATH", "/songs")
 yt_jobs: dict[str, dict] = {}
 
+# Caps how many yt-dlp network operations (info fetch + download) run at
+# once, app-wide. A playlist submission queues every track's job almost
+# simultaneously; without this, YouTube sees a burst of dozens of concurrent
+# requests from one IP and starts returning 403s for everything in flight,
+# including unrelated single-video requests.
+_YT_CONCURRENCY = asyncio.Semaphore(3)
+
 
 _UNSAFE_FILENAME_CHARS = set('/\\:*?"<>|\x00')
 
@@ -910,6 +917,30 @@ class YTSubmit(BaseModel):
     bitrate: str = "320"
     enhance: bool = False
     save_to_library: bool = False
+
+
+def _is_youtube_playlist(url: str) -> bool:
+    """
+    True only for URLs that represent a real, user-curated playlist.
+
+    YouTube appends a `list=RD...` "Radio"/Mix parameter (and often
+    `start_radio=1`) to a *video's own* URL whenever autoplay queues up a
+    continuation — most users copy that URL straight from the address bar
+    without noticing. Treating it as a playlist silently balloons a single
+    video request into dozens of concurrent downloads, which is enough to
+    get YouTube to start throttling the container's IP with 403s for
+    everything, not just the mix.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if "/playlist" in parsed.path:
+        return True
+    qs = urllib.parse.parse_qs(parsed.query)
+    list_id = (qs.get("list") or [""])[0]
+    if not list_id:
+        return False
+    if list_id.startswith("RD") or "start_radio" in qs:
+        return False
+    return True
 
 
 def update_yt_job(job_id: str, **kwargs) -> None:
@@ -964,15 +995,16 @@ async def process_youtube_job(
                 return info
 
         async def _heartbeat_info():
-            elapsed = 0
-            future = loop.run_in_executor(None, _get_info)
-            while not future.done():
-                await asyncio.sleep(8)
-                elapsed += 8
-                if yt_jobs.get(job_id, {}).get("status") == "parsing":
-                    update_yt_job(job_id,
-                                  step=f"Fetching video info… ({elapsed}s elapsed)")
-            return await future
+            async with _YT_CONCURRENCY:
+                elapsed = 0
+                future = loop.run_in_executor(None, _get_info)
+                while not future.done():
+                    await asyncio.sleep(8)
+                    elapsed += 8
+                    if yt_jobs.get(job_id, {}).get("status") == "parsing":
+                        update_yt_job(job_id,
+                                      step=f"Fetching video info… ({elapsed}s elapsed)")
+                return await future
 
         info = await _heartbeat_info()
         title = info.get("title", "audio")
@@ -1006,20 +1038,44 @@ async def process_youtube_job(
                 "outtmpl": os.path.join(tmpdir, "raw_audio.%(ext)s"),
                 "progress_hooks": [_hook],
             }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+
+            # YouTube intermittently 403s a freshly-signed stream URL for
+            # reasons unrelated to the video or client used — observed to
+            # fail roughly 1 in 3 attempts even on ordinary public videos.
+            # Retrying the same URL just repeats the same failure; re-running
+            # the whole download forces yt-dlp to re-extract and sign a new
+            # one, which is usually enough on its own.
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        ydl.download([url])
+                    return
+                except Exception as exc:
+                    if "403" not in str(exc) or attempt == max_attempts:
+                        raise
+                    print(
+                        f"[yt-dlp] Download got a 403 (attempt {attempt}/{max_attempts}) "
+                        "— retrying with a fresh extraction…", flush=True,
+                    )
+                    update_yt_job(
+                        job_id,
+                        step=f"Download blocked, retrying… (attempt {attempt + 1}/{max_attempts})",
+                    )
+                    time.sleep(2)
 
         async def _heartbeat_download():
-            elapsed = 0
-            future = loop.run_in_executor(None, _download)
-            while not future.done():
-                await asyncio.sleep(8)
-                elapsed += 8
-                m, s = divmod(elapsed, 60)
-                if yt_jobs.get(job_id, {}).get("status") in ("extracting", "downloading"):
-                    update_yt_job(job_id,
-                                  step=f"Downloading audio… ({m}m {s:02d}s elapsed)")
-            await future
+            async with _YT_CONCURRENCY:
+                elapsed = 0
+                future = loop.run_in_executor(None, _download)
+                while not future.done():
+                    await asyncio.sleep(8)
+                    elapsed += 8
+                    m, s = divmod(elapsed, 60)
+                    if yt_jobs.get(job_id, {}).get("status") in ("extracting", "downloading"):
+                        update_yt_job(job_id,
+                                      step=f"Downloading audio… ({m}m {s:02d}s elapsed)")
+                await future
 
         await _heartbeat_download()
 
@@ -1103,7 +1159,7 @@ async def youtube_submit(body: YTSubmit, background_tasks: BackgroundTasks):
         raise HTTPException(400, detail="Please provide a valid YouTube URL.")
     bitrate = body.bitrate if body.bitrate in ("128", "192", "320") else "320"
 
-    is_playlist = "list=" in url or "/playlist" in url
+    is_playlist = _is_youtube_playlist(url)
 
     if is_playlist:
         def _playlist_info():
