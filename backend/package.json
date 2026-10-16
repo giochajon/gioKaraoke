@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "server.js",
   "dependencies": {
-    "express": "^4.19.2",
+    "express": "^5.2.1",
     "meilisearch": "^0.40.0",
     "adm-zip": "^0.6.0",
     "dotenv": "^16.4.5"
